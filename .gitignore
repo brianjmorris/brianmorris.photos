@@ -1,5 +1,9 @@
 /local/
 
+# Keep project notes local; the root README is the only committed Markdown file.
+*.[mM][dD]
+!/README.md
+
 # Dependencies, generated output, and local runtime state.
 node_modules/
 /dist/
