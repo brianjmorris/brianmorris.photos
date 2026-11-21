@@ -1,0 +1,3 @@
+# No environment variables or credentials are required for the local scaffold.
+# Copy to .dev.vars only when a feature introduces local server-side variables.
+# .dev.vars is ignored by Git. Never put secrets in PUBLIC_ variables.

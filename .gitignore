@@ -1,0 +1,50 @@
+/local/
+
+# Dependencies, generated output, and local runtime state.
+node_modules/
+/dist/
+/.astro/
+/.wrangler/
+/coverage/
+*.tsbuildinfo
+*.log
+
+# Local environment values and credentials; examples contain no secrets.
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+/.aws/
+/.codex/
+/.agents/
+*.pem
+*.key
+
+# Source photographs and processing inputs belong outside the repository.
+/photos/
+/originals/
+/imports/
+*.[jJ][pP][gG]
+*.[jJ][pP][eE][gG]
+*.[pP][nN][gG]
+*.[wW][eE][bB][pP]
+*.[aA][vV][iI][fF]
+*.[hH][eE][iI][cC]
+*.[tT][iI][fF]
+*.[tT][iI][fF][fF]
+*.[dD][nN][gG]
+*.[cC][rR]2
+*.[cC][rR]3
+*.[nN][eE][fF]
+*.[aA][rR][wW]
+*.[rR][aA][fF]
+*.[oO][rR][fF]
+*.[rR][wW]2
+*.[xX][mM][pP]
+
+# Operating-system files.
+.DS_Store
+Thumbs.db
+Desktop.ini

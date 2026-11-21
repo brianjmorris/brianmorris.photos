@@ -1,0 +1,50 @@
+---
+interface Props {
+  title: string;
+  description: string;
+}
+
+const { title, description } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>{title}</title>
+  </head>
+  <body>
+    <main>
+      <slot />
+    </main>
+  </body>
+</html>
+
+<style is:global>
+  :root {
+    font-family: system-ui, sans-serif;
+    color: #242424;
+    background: #f7f6f2;
+    line-height: 1.5;
+    color-scheme: light;
+  }
+
+  body {
+    margin: 0;
+  }
+
+  main {
+    max-width: 48rem;
+    margin-inline: auto;
+    padding: clamp(2rem, 8vw, 6rem) 1.5rem;
+  }
+
+  h1 {
+    font-size: clamp(2rem, 6vw, 3rem);
+    font-weight: 500;
+    line-height: 1.15;
+  }
+</style>

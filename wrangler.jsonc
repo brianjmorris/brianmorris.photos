@@ -1,0 +1,14 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "brianmorris-photos",
+  "main": "@astrojs/cloudflare/entrypoints/server",
+  "compatibility_date": "2026-11-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "routes": [],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+  },
+}
