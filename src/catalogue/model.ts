@@ -1,8 +1,11 @@
+import type { PhotoMetadata } from './metadata.ts';
+
 export interface PhotoRevision {
   photoId: string;
   revision: number;
   createdAt: number;
   tagIds: string[];
+  metadata: PhotoMetadata | null;
 }
 
 export interface TagRevision {

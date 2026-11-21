@@ -1,4 +1,11 @@
 import { writeCatalogueBatch, type CatalogueDatabase } from './d1.ts';
+import {
+  metadataStatement,
+  readPhotoMetadata,
+  readPublishedPhotoMetadata,
+  type PhotoMetadataInput,
+  type PublicPhotoMetadata,
+} from './metadata.ts';
 import { validId, validRevision, validTime } from './validation.ts';
 import {
   CatalogueError,
@@ -29,6 +36,7 @@ export class CatalogueRepository {
     revision: number,
     tagIds: readonly string[],
     now: number,
+    metadata?: PhotoMetadataInput,
   ) {
     validId(id);
     validRevision(revision);
@@ -39,6 +47,7 @@ export class CatalogueRepository {
     tagIds.forEach(validId);
     const uniqueTags = [...new Set(tagIds)];
     return [
+      metadataStatement(this.db, id, revision, metadata),
       ...uniqueTags.map((tagId) =>
         this.statement(
           'INSERT INTO photo_tags (photo_id, photo_revision, tag_id) VALUES (?, ?, ?)',
@@ -95,6 +104,32 @@ export class CatalogueRepository {
     return (await this.getPhotoRevision(id, revision))!;
   }
 
+  async savePhotoMetadataDraft(
+    id: string,
+    expectedRevision: number,
+    metadata: PhotoMetadataInput,
+    now = Date.now(),
+  ): Promise<PhotoRevision> {
+    validId(id);
+    validRevision(expectedRevision);
+    const current = await this.getPhotoDraft(id);
+    if (!current) throw new CatalogueError('not_found', 'Photo not found.');
+    if (current.revision !== expectedRevision)
+      throw new CatalogueError('conflict', 'Photo revision changed.');
+    const revision = expectedRevision + 1;
+    await writeCatalogueBatch(
+      this.db,
+      this.photoStatements(id, revision, current.tagIds, now, metadata),
+    );
+    return (await this.getPhotoRevision(id, revision))!;
+  }
+
+  async getPublishedPhotoMetadata(
+    id: string,
+  ): Promise<PublicPhotoMetadata | null> {
+    return readPublishedPhotoMetadata(this.db, id);
+  }
+
   async getPhotoRevision(
     id: string,
     revision: number,
@@ -117,6 +152,7 @@ export class CatalogueRepository {
       revision,
       createdAt: row.created_at,
       tagIds: tags.results.map((tag) => tag.tag_id),
+      metadata: await readPhotoMetadata(this.db, id, revision),
     };
   }
 

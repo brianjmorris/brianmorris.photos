@@ -22,6 +22,12 @@ export async function writeCatalogueBatch(
     await db.batch(statements);
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
+    if (/invalid_place_(hierarchy|parent_kind)/.test(message))
+      throw new CatalogueError(
+        'invalid_input',
+        'Place hierarchy is cyclic, exceeds 16 levels, or has an invalid parent type.',
+        { cause },
+      );
     if (
       /catalogue_.*conflict|UNIQUE constraint failed|immutable_photo_membership|immutable_tag_aliases/.test(
         message,
@@ -29,7 +35,7 @@ export async function writeCatalogueBatch(
     ) {
       throw new CatalogueError(
         'conflict',
-        'A revision, name, alias, or slug conflicts.',
+        'A revision, name, alias, slug, or source record conflicts.',
         { cause },
       );
     }
