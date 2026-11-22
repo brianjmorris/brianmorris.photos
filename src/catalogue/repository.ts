@@ -57,7 +57,7 @@ export class CatalogueRepository {
         ),
       ),
       this.statement(
-        'INSERT INTO photo_revisions VALUES (?, ?, ?)',
+        'INSERT INTO photo_revisions (photo_id, revision, created_at) VALUES (?, ?, ?)',
         id,
         revision,
         now,
@@ -195,7 +195,7 @@ export class CatalogueRepository {
         invalid('Aliases must be distinct from the name and each other.');
       seen.add(normalized);
       return this.statement(
-        'INSERT INTO tag_aliases VALUES (?, ?, ?, ?)',
+        'INSERT INTO tag_aliases (tag_id, tag_revision, alias, normalized_alias) VALUES (?, ?, ?, ?)',
         id,
         revision,
         alias,
@@ -205,7 +205,7 @@ export class CatalogueRepository {
     return [
       ...aliasStatements,
       this.statement(
-        'INSERT INTO tag_revisions VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO tag_revisions (tag_id, revision, created_at, name, normalized_name, slug) VALUES (?, ?, ?, ?, ?, ?)',
         id,
         revision,
         now,

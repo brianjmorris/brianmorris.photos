@@ -123,7 +123,9 @@ export async function applyLocalMigrations(db, through) {
     await db.batch([
       ...statements.map((statement) => db.prepare(statement)),
       db
-        .prepare('INSERT INTO catalogue_test_migrations VALUES (?, ?)')
+        .prepare(
+          'INSERT INTO catalogue_test_migrations (name, sha256) VALUES (?, ?)',
+        )
         .bind(name, sha256),
     ]);
   }

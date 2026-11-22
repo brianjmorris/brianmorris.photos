@@ -12,7 +12,7 @@
     "dev": "astro dev --host 127.0.0.1",
     "check": "astro check",
     "build": "astro build",
-    "test": "node --test tests/catalogue.test.mjs tests/metadata.test.mjs",
+    "test": "node --test tests/catalogue.test.mjs tests/metadata.test.mjs tests/migrations.test.mjs tests/discovery.test.mjs",
     "verify": "npm run format:check && npm run check && npm test && npm run build",
     "deploy": "wrangler deploy --config dist/server/wrangler.json",
     "deploy:check": "wrangler deploy --config dist/server/wrangler.json --dry-run",

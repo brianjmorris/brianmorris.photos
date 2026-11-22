@@ -1,5 +1,5 @@
 // Deterministic, synthetic storage fixtures. No image files or private metadata.
-export async function seedCatalogue(db, size) {
+export async function seedCatalogue(db, size, { dense = false } = {}) {
   if (![1000, 10000].includes(size))
     throw new Error('Unsupported fixture size');
   const prefix = `fixture-${size}`;
@@ -38,7 +38,7 @@ export async function seedCatalogue(db, size) {
       { length: Math.min(250, size - start) },
       (_, offset) => {
         const i = start + offset;
-        const tagIndexes =
+        let tagIndexes =
           i % 19 === 0
             ? []
             : [
@@ -50,6 +50,9 @@ export async function seedCatalogue(db, size) {
                   3 + ((i * 13) % 297),
                 ]),
               ];
+        if (dense && i % 97 === 0 && tagIndexes.length) {
+          tagIndexes = Array.from({ length: 64 }, (_, index) => index);
+        }
         const photo = {
           id: `${prefix}-photo-${i.toString().padStart(6, '0')}`,
           tagIds: tagIndexes.map((index) => tags[index].id),

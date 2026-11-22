@@ -118,7 +118,9 @@ export class PlaceRepository {
         invalid('Place aliases must be distinct within a revision.');
       seen.add(normalized);
       return this.db
-        .prepare('INSERT INTO place_aliases VALUES (?, ?, ?, ?)')
+        .prepare(
+          'INSERT INTO place_aliases (place_id, place_revision, alias, normalized_alias) VALUES (?, ?, ?, ?)',
+        )
         .bind(id, revision, alias, normalized);
     });
     return [
