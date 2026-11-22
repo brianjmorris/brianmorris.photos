@@ -12,8 +12,8 @@ const issuer = 'https://synthetic-team.cloudflareaccess.com';
 const env = {
   ACCESS_TEAM_DOMAIN: issuer,
   ACCESS_AUDIENCE: 'synthetic-audience',
-  OWNER_EMAIL: 'owner@example.test',
 };
+const fixtureEmail = 'owner@example.test';
 const request = (
   token,
   {
@@ -40,7 +40,7 @@ async function token(claims = {}, options = {}) {
     sub: 'synthetic-subject',
     iat: now,
     exp: now + 3600,
-    email: env.OWNER_EMAIL,
+    email: fixtureEmail,
     type: 'app',
     ...claims,
   };
@@ -76,13 +76,13 @@ before(async () => {
   ];
 });
 
-describe('configured owner identity verification', () => {
-  it('accepts only signed owner identity and reuses the signing-key cache', async () => {
+describe('Cloudflare-approved dashboard identity verification', () => {
+  it('accepts a signed dashboard identity and reuses the signing-key cache', async () => {
     const { authorize, calls } = transport();
     const signed = await token();
     const owner = {
       ok: true,
-      owner: { subject: 'synthetic-subject', email: env.OWNER_EMAIL },
+      owner: { subject: 'synthetic-subject', email: fixtureEmail },
     };
     assert.deepEqual(await authorize(request(signed), env), owner);
     assert.deepEqual(await authorize(request(signed), env), owner);
@@ -91,12 +91,11 @@ describe('configured owner identity verification', () => {
     ]);
   });
 
-  it('gets issuer, application and owner identity from server configuration', async () => {
+  it('gets issuer and application from server configuration and identity from the signed token', async () => {
     const { authorize } = transport();
     const otherEnv = {
       ACCESS_TEAM_DOMAIN: 'https://another-team.cloudflareaccess.com/',
       ACCESS_AUDIENCE: 'another-application',
-      OWNER_EMAIL: 'Another-Owner@example.test',
     };
     const signed = await token({
       iss: 'https://another-team.cloudflareaccess.com',
@@ -117,8 +116,8 @@ describe('configured owner identity verification', () => {
     const { authorize, calls } = transport();
     for (const config of [
       {},
-      { ...env, OWNER_EMAIL: '' },
-      { ...env, OWNER_EMAIL: 'not-an-email' },
+      { ...env, ACCESS_TEAM_DOMAIN: undefined },
+      { ...env, ACCESS_AUDIENCE: undefined },
       { ...env, ACCESS_AUDIENCE: '' },
       {
         ...env,
@@ -146,7 +145,7 @@ describe('configured owner identity verification', () => {
     for (const req of [
       request(),
       request(undefined, {
-        headers: { 'Cf-Access-Authenticated-User-Email': env.OWNER_EMAIL },
+        headers: { 'Cf-Access-Authenticated-User-Email': fixtureEmail },
       }),
       request(undefined, {
         headers: { Cookie: `CF_Authorization=${await token()}` },
@@ -162,7 +161,7 @@ describe('configured owner identity verification', () => {
     const { authorize } = transport();
     const signed = await token();
     const [header, payload] = signed.split('.');
-    const hmac = await new SignJWT({ email: env.OWNER_EMAIL })
+    const hmac = await new SignJWT({ email: fixtureEmail })
       .setProtectedHeader({ alg: 'HS256' })
       .sign(
         new TextEncoder().encode('synthetic-test-key-with-at-least-32-bytes'),
@@ -193,6 +192,9 @@ describe('configured owner identity verification', () => {
       { sub: '' },
       { sub: 123 },
       { email: [] },
+      { email: '' },
+      { email: 'not-an-email' },
+      { email: 'x'.repeat(255) + '@example.test' },
       { type: 'service' },
     ]) {
       assert.deepEqual(
@@ -208,14 +210,20 @@ describe('configured owner identity verification', () => {
     }
   });
 
-  it('rejects another signed-in user even with a valid application token', async () => {
+  it('accepts an email change approved by Cloudflare without changing server configuration', async () => {
     const { authorize } = transport();
     assert.deepEqual(
       await authorize(
-        request(await token({ email: 'visitor@example.test' })),
+        request(await token({ email: 'new-address@example.test' })),
         env,
       ),
-      denied(403),
+      {
+        ok: true,
+        owner: {
+          subject: 'synthetic-subject',
+          email: 'new-address@example.test',
+        },
+      },
     );
     assert.deepEqual(
       await authorize(
@@ -224,7 +232,7 @@ describe('configured owner identity verification', () => {
       ),
       {
         ok: true,
-        owner: { subject: 'synthetic-subject', email: env.OWNER_EMAIL },
+        owner: { subject: 'synthetic-subject', email: fixtureEmail },
       },
     );
   });
@@ -365,7 +373,10 @@ describe('private request boundary', () => {
       for (const signed of [
         undefined,
         'fake',
-        await token({ email: 'visitor@example.test' }),
+        await token({
+          email: 'visitor@example.test',
+          aud: ['different-application'],
+        }),
       ]) {
         const response = await guardOwnerRequest(
           request(signed, { url }),
@@ -373,7 +384,7 @@ describe('private request boundary', () => {
           authorize,
           async () => assert.fail('Unauthorized handler reached'),
         );
-        assert([401, 403].includes(response.status));
+        assert.equal(response.status, 401);
         assertPrivate(response);
         assert.equal(await response.text(), 'Sign-in required.');
       }
@@ -428,7 +439,7 @@ describe('private request boundary', () => {
     assert.equal(await failed.text(), 'Dashboard unavailable.');
   });
 
-  it('runs the built Worker with public access, missing setup, valid owner sign-in and unauthorized users', async () => {
+  it('runs the built Worker with public access, missing setup, approved email changes and wrong-application rejection', async () => {
     // Build current source instead of relying on potentially stale dist output.
     execFileSync(
       process.execPath,
@@ -481,7 +492,7 @@ describe('private request boundary', () => {
         const response = await mf.dispatchFetch(
           'https://photos.example.test' + path,
           {
-            headers: { 'Cf-Access-Authenticated-User-Email': env.OWNER_EMAIL },
+            headers: { 'Cf-Access-Authenticated-User-Email': fixtureEmail },
           },
         );
         assert.equal(response.status, 503, path);
@@ -539,11 +550,25 @@ describe('private request boundary', () => {
       assert.equal(session.status, 200);
       assert.deepEqual(await session.json(), { authenticated: true });
       assertPrivate(session);
+      const updatedEmail = await configured.dispatchFetch(
+        'https://photos.example.test/api/owner/session',
+        {
+          headers: {
+            'Cf-Access-Jwt-Assertion': await token({
+              email: 'new-address@example.test',
+            }),
+          },
+        },
+      );
+      assert.equal(updatedEmail.status, 200);
+      assert.deepEqual(await updatedEmail.json(), { authenticated: true });
+      assertPrivate(updatedEmail);
       for (const headers of [
-        { 'Cf-Access-Authenticated-User-Email': env.OWNER_EMAIL },
+        { 'Cf-Access-Authenticated-User-Email': fixtureEmail },
         {
           'Cf-Access-Jwt-Assertion': await token({
             email: 'visitor@example.test',
+            aud: ['different-application'],
           }),
         },
       ]) {
@@ -551,7 +576,7 @@ describe('private request boundary', () => {
           'https://photos.example.test/dashboard',
           { headers },
         );
-        assert([401, 403].includes(denied.status));
+        assert.equal(denied.status, 401);
         assertPrivate(denied);
       }
     } finally {

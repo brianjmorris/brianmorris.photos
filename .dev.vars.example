@@ -1,7 +1,7 @@
 # The public site needs no variables. Private routes deny access until configured.
 # Copy to ignored .dev.vars for local server-side configuration.
 # Set equivalent values separately in production and preview server environments.
-# Never put these settings in PUBLIC_ variables or commit real owner identities.
+# Manage permitted users only in this Access application's Cloudflare policy.
+# Never put these server settings in PUBLIC_ variables.
 ACCESS_TEAM_DOMAIN="https://your-team.cloudflareaccess.com"
 ACCESS_AUDIENCE="replace-with-your-access-application-audience"
-OWNER_EMAIL="owner@example.invalid"

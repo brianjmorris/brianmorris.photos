@@ -10,7 +10,6 @@ declare global {
     interface Env {
       ACCESS_TEAM_DOMAIN?: string;
       ACCESS_AUDIENCE?: string;
-      OWNER_EMAIL?: string;
     }
   }
 }

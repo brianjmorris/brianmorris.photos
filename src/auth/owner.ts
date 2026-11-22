@@ -9,7 +9,6 @@ import {
 export interface OwnerAccessEnvironment {
   ACCESS_TEAM_DOMAIN?: string;
   ACCESS_AUDIENCE?: string;
-  OWNER_EMAIL?: string;
 }
 
 export interface OwnerIdentity {
@@ -18,7 +17,7 @@ export interface OwnerIdentity {
 }
 
 export type OwnerAccessResult =
-  { ok: true; owner: OwnerIdentity } | { ok: false; status: 401 | 403 | 503 };
+  { ok: true; owner: OwnerIdentity } | { ok: false; status: 401 | 503 };
 
 function configuration(env: OwnerAccessEnvironment) {
   try {
@@ -38,15 +37,8 @@ function configuration(env: OwnerAccessEnvironment) {
     )
       return null;
     const audience = env.ACCESS_AUDIENCE?.trim();
-    const email = env.OWNER_EMAIL?.trim().toLowerCase();
     if (!audience || audience.length > 256 || /\s/.test(audience)) return null;
-    if (
-      !email ||
-      email.length > 254 ||
-      !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)
-    )
-      return null;
-    return { issuer: issuer.origin, audience, email };
+    return { issuer: issuer.origin, audience };
   } catch {
     return null;
   }
@@ -94,12 +86,18 @@ export function createOwnerAuthorizer(fetchKeys?: FetchImplementation) {
         typeof payload.exp !== 'number' ||
         !Number.isSafeInteger(payload.exp) ||
         payload.exp <= payload.iat ||
-        typeof payload.email !== 'string'
+        typeof payload.email !== 'string' ||
+        payload.email.length > 254 ||
+        !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(payload.email)
       )
         return { ok: false, status: 401 };
-      if (payload.email.toLowerCase() !== config.email)
-        return { ok: false, status: 403 };
-      return { ok: true, owner: { subject: payload.sub, email: config.email } };
+      // The dedicated dashboard application's Access policy owns the allowlist.
+      // An authentic human token for this exact application is its approval;
+      // the app must not maintain a second email list or trust another app's token.
+      return {
+        ok: true,
+        owner: { subject: payload.sub, email: payload.email.toLowerCase() },
+      };
     } catch (error) {
       // Invalid credentials are distinct from an unavailable signing-key service.
       // Never send raw library errors, token claims, or settings to the browser.
