@@ -1,3 +1,7 @@
-# No environment variables or credentials are required for the local scaffold.
-# Copy to .dev.vars only when a feature introduces local server-side variables.
-# .dev.vars is ignored by Git. Never put secrets in PUBLIC_ variables.
+# The public site needs no variables. Private routes deny access until configured.
+# Copy to ignored .dev.vars for local server-side configuration.
+# Set equivalent values separately in production and preview server environments.
+# Never put these settings in PUBLIC_ variables or commit real owner identities.
+ACCESS_TEAM_DOMAIN="https://your-team.cloudflareaccess.com"
+ACCESS_AUDIENCE="replace-with-your-access-application-audience"
+OWNER_EMAIL="owner@example.invalid"

@@ -1,0 +1,14 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+
+if (!Astro.locals.owner)
+  return new Response('Sign-in required.', { status: 403 });
+---
+
+<BaseLayout title="Dashboard" description="Private photography dashboard.">
+  <h1>Dashboard</h1>
+  <p>
+    You’re signed in. Your photo and collection tools will appear here as
+    they’re added.
+  </p>
+</BaseLayout>
