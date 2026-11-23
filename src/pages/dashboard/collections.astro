@@ -1,0 +1,559 @@
+---
+import { env } from 'cloudflare:workers';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { CatalogueRepository } from '../../catalogue/repository.ts';
+import {
+  CatalogueError,
+  invalid,
+  type CoverChoice,
+  type TagDraftSummary,
+  type PublishedMembership,
+} from '../../catalogue/model.ts';
+import { validId, validTime } from '../../catalogue/validation.ts';
+import {
+  collectionError,
+  collectionInput,
+  readCollectionBody,
+} from '../../authoring/collections.ts';
+
+if (!Astro.locals.owner)
+  return new Response('Sign-in required.', { status: 403 });
+if (!['GET', 'HEAD', 'POST'].includes(Astro.request.method))
+  return new Response('Method not allowed.', {
+    status: 405,
+    headers: { Allow: 'GET, HEAD, POST' },
+  });
+
+const repository = env.CATALOGUE
+  ? new CatalogueRepository(env.CATALOGUE)
+  : null;
+let available = Boolean(repository);
+let error = '';
+let tagId = Astro.url.searchParams.get('edit') ?? '';
+let values: Record<string, string> = {
+  name: '',
+  slug: '',
+  aliases: '',
+  notes: '',
+  featured: '',
+  featuredOrder: '0',
+  coverPhotoId: '',
+  expectedRevision: '',
+};
+let items: TagDraftSummary[] = [];
+let nextAfter: string | null = null;
+let covers: CoverChoice[] = [];
+let nextCover: PublishedMembership | null = null;
+
+if (Astro.request.method === 'POST' && repository) {
+  try {
+    const data = (await readCollectionBody(Astro.request, 'form')) as Record<
+      string,
+      string
+    >;
+    const allowed = [
+      'tagId',
+      'expectedRevision',
+      'name',
+      'slug',
+      'aliases',
+      'notes',
+      'featured',
+      'featuredOrder',
+      'coverPhotoId',
+    ];
+    if (Object.keys(data).some((key) => !allowed.includes(key)))
+      invalid('Unexpected collection field.');
+    values = { ...values, ...data };
+    tagId = data.tagId ?? '';
+    if (tagId) validId(tagId);
+    if (data.featured !== undefined && data.featured !== 'on')
+      invalid('Invalid featured selection.');
+    if (data.featured && !/^(0|[1-9]\d*)$/.test(values.featuredOrder))
+      invalid('Enter a whole number for featured order.');
+    if (tagId && !/^[1-9]\d*$/.test(values.expectedRevision))
+      invalid('An existing revision is required.');
+    const { input, expectedRevision } = collectionInput(
+      {
+        name: values.name,
+        slug: values.slug,
+        aliases: values.aliases
+          .split(/\r?\n/)
+          .map((value) => value.trim())
+          .filter(Boolean),
+        notes: values.notes,
+        featuredOrder: data.featured ? Number(values.featuredOrder) : null,
+        coverPhotoId: values.coverPhotoId || null,
+        ...(tagId ? { expectedRevision: Number(values.expectedRevision) } : {}),
+      },
+      Boolean(tagId),
+    );
+    const saved = tagId
+      ? await repository.saveTagDraft(tagId, expectedRevision!, input)
+      : await repository.createTag(input);
+    return Astro.redirect(
+      `/dashboard/collections?edit=${encodeURIComponent(saved.tagId)}&saved=1`,
+      303,
+    );
+  } catch (cause) {
+    const result = collectionError(cause);
+    error = result.message;
+    Astro.response.status = result.status;
+  }
+}
+
+if (repository) {
+  try {
+    if (tagId && Astro.request.method === 'GET') {
+      const tag = await repository.getTagDraft(tagId);
+      if (!tag) throw new CatalogueError('not_found', 'Collection not found.');
+      values = {
+        name: tag.name,
+        slug: tag.slug,
+        aliases: tag.aliases.join('\n'),
+        notes: tag.notes,
+        featured: tag.featuredOrder === null ? '' : 'on',
+        featuredOrder: String(tag.featuredOrder ?? 0),
+        coverPhotoId: tag.coverPhotoId ?? '',
+        expectedRevision: String(tag.revision),
+      };
+    }
+    ({ items, nextAfter } = await repository.listTagDrafts(
+      Astro.url.searchParams.get('after') ?? undefined,
+    ));
+    if (tagId) {
+      const beforeId = Astro.url.searchParams.get('coverBefore');
+      const beforeTime = Astro.url.searchParams.get('coverTime');
+      let before:
+        Pick<PublishedMembership, 'photoId' | 'firstPublishedAt'> | undefined;
+      if (beforeId || beforeTime) {
+        if (!beforeId || !beforeTime || !/^(0|[1-9]\d*)$/.test(beforeTime))
+          invalid('Invalid cover page.');
+        validId(beforeId);
+        validTime(Number(beforeTime));
+        before = { photoId: beforeId, firstPublishedAt: Number(beforeTime) };
+      }
+      const result = await repository.listCoverChoices(tagId, before);
+      covers = result.items;
+      nextCover = result.nextAfter;
+    }
+  } catch (cause) {
+    const result = collectionError(cause);
+    if (!error) error = result.message;
+    Astro.response.status = result.status;
+    if (
+      result.status === 503 ||
+      result.status === 404 ||
+      (!values.expectedRevision && tagId)
+    )
+      available = false;
+  }
+} else {
+  error = 'Collections are temporarily unavailable. Please try again later.';
+  Astro.response.status = 503;
+}
+const currentCoverOutsidePage =
+  values.coverPhotoId &&
+  !covers.some((photo) => photo.photoId === values.coverPhotoId);
+---
+
+<BaseLayout
+  title="Tags and collections"
+  description="Manage private collection drafts."
+>
+  <header class="page-heading">
+    <div>
+      <a class="back" href="/dashboard">
+        Dashboard
+      </a>
+      <h1>Tags and collections</h1>
+      <p>A tag brings photographs together as a collection.</p>
+    </div>
+    <a class="button secondary" href="/dashboard/collections">
+      New collection
+    </a>
+  </header>
+
+  {error && (
+    <div class="notice error" role="alert">
+      <p>{error}</p>
+      {Astro.response.status === 409 && (
+        <a
+          href={
+            tagId
+              ? `/dashboard/collections?edit=${encodeURIComponent(tagId)}`
+              : '/dashboard/collections'
+          }
+        >
+          Reload the saved draft before trying again
+        </a>
+      )}
+    </div>
+  )}
+  {!error && Astro.url.searchParams.get('saved') === '1' && (
+    <p class="notice" role="status">
+      Draft saved. Published content has not changed.
+    </p>
+  )}
+
+  {available && (
+    <div class="workspace">
+      <section class="collection-list" aria-labelledby="collections-heading">
+        <h2 id="collections-heading">Collections</h2>
+        {items.length ? (
+          <ul>
+            {items.map((tag) => (
+              <li>
+                <a
+                  href={`/dashboard/collections?edit=${encodeURIComponent(tag.tagId)}`}
+                  aria-current={tagId === tag.tagId ? 'page' : undefined}
+                >
+                  <strong>{tag.name}</strong>
+                  <span>
+                    {tag.publishedRevision === null
+                      ? 'Unpublished'
+                      : tag.publishedRevision === tag.revision
+                        ? 'Published'
+                        : 'Draft changes'}
+                    {tag.featuredOrder !== null ? ' · Featured' : ''}
+                  </span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>No collections yet. Create a tag to get started.</p>
+        )}
+        <nav class="pagination" aria-label="Collection pages">
+          {Astro.url.searchParams.has('after') && (
+            <a href="/dashboard/collections">First page</a>
+          )}
+          {nextAfter && (
+            <a
+              href={`/dashboard/collections?after=${encodeURIComponent(nextAfter)}`}
+            >
+              Next collections
+            </a>
+          )}
+        </nav>
+      </section>
+
+      <section class="editor" aria-labelledby="editor-heading">
+        <h2 id="editor-heading">
+          {tagId ? 'Edit collection' : 'New collection'}
+        </h2>
+        <p class="hint">Save a private draft. Publishing comes separately.</p>
+        <form method="post" action="/dashboard/collections">
+          <input type="hidden" name="tagId" value={tagId} />
+          <input
+            type="hidden"
+            name="expectedRevision"
+            value={values.expectedRevision}
+          />
+          <label for="name">Tag name</label>
+          <input
+            id="name"
+            name="name"
+            value={values.name}
+            required
+            maxlength="120"
+            autocomplete="off"
+          />
+          <label for="slug">Collection address</label>
+          <input
+            id="slug"
+            name="slug"
+            value={values.slug}
+            required
+            maxlength="120"
+            pattern="[a-z0-9]+(-[a-z0-9]+)*"
+            aria-describedby="slug-help"
+            autocomplete="off"
+          />
+          <p class="hint" id="slug-help">
+            Use lowercase letters, numbers and hyphens, such as nordic-2026.
+            Earlier addresses stay reserved for this collection.
+          </p>
+          <label for="aliases">Alternate names</label>
+          <textarea
+            id="aliases"
+            name="aliases"
+            rows="3"
+            maxlength="4000"
+            aria-describedby="aliases-help"
+          >{values.aliases}</textarea>
+          <p class="hint" id="aliases-help">
+            One per line, up to 32. Names must be unique across all tags and
+            alternate names.
+          </p>
+          <label for="notes">Collection notes</label>
+          <textarea
+            id="notes"
+            name="notes"
+            rows="9"
+            maxlength="20000"
+            aria-describedby="notes-help"
+          >{values.notes}</textarea>
+          <p class="hint" id="notes-help">
+            Optional plain text, up to 20,000 characters.
+          </p>
+          <fieldset>
+            <legend>Featuring</legend>
+            <label class="checkbox">
+              <input
+                type="checkbox"
+                name="featured"
+                checked={values.featured === 'on'}
+              />
+              Feature this collection
+            </label>
+            <label for="featuredOrder">Featured order</label>
+            <input
+              id="featuredOrder"
+              class="number"
+              type="number"
+              name="featuredOrder"
+              value={values.featuredOrder}
+              min="0"
+              max="1000000"
+              step="1"
+              aria-describedby="featured-help"
+            />
+            <p class="hint" id="featured-help">
+              Lower numbers appear first. Used only when the collection is
+              featured.
+            </p>
+          </fieldset>
+          <label for="coverPhotoId">Cover photograph</label>
+          <select
+            id="coverPhotoId"
+            name="coverPhotoId"
+            aria-describedby="cover-help"
+          >
+            <option value="" selected={!values.coverPhotoId}>
+              No cover selected
+            </option>
+            {currentCoverOutsidePage && (
+              <option value={values.coverPhotoId} selected>
+                Current cover
+              </option>
+            )}
+            {covers.map((photo) => (
+              <option
+                value={photo.photoId}
+                selected={photo.photoId === values.coverPhotoId}
+              >
+                {photo.title || 'Untitled photograph'} · Published{' '}
+                {new Date(photo.firstPublishedAt).toISOString().slice(0, 10)}
+              </option>
+            ))}
+          </select>
+          <p class="hint" id="cover-help">
+            Choose a published photograph from this collection.
+            {!tagId
+              ? ' Save the new collection first.'
+              : !covers.length
+                ? ' No published photographs on this page.'
+                : ''}
+          </p>
+          {(nextCover || Astro.url.searchParams.has('coverBefore')) && (
+            <nav class="pagination" aria-label="Cover photograph pages">
+              <span class="hint">
+                Save changes before changing the cover page.
+              </span>
+              {Astro.url.searchParams.has('coverBefore') && (
+                <a
+                  href={`/dashboard/collections?edit=${encodeURIComponent(tagId)}`}
+                >
+                  Newest photographs
+                </a>
+              )}
+              {nextCover && (
+                <a
+                  href={`/dashboard/collections?edit=${encodeURIComponent(tagId)}&coverBefore=${encodeURIComponent(nextCover.photoId)}&coverTime=${nextCover.firstPublishedAt}`}
+                >
+                  Older photographs
+                </a>
+              )}
+            </nav>
+          )}
+          <button class="button" type="submit">
+            Save draft
+          </button>
+        </form>
+      </section>
+    </div>
+  )}
+</BaseLayout>
+
+<style>
+  :global(main) {
+    max-width: 72rem;
+    padding-block: clamp(2rem, 5vw, 4rem);
+  }
+  .page-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+  h1 {
+    margin-block: 0.5rem;
+  }
+  h2 {
+    margin-top: 0;
+    font-size: 1.35rem;
+    font-weight: 600;
+  }
+  a {
+    color: #315642;
+    text-underline-offset: 0.2em;
+  }
+  .back,
+  .hint {
+    font-size: 0.9rem;
+  }
+  .hint {
+    color: #555b55;
+    margin-top: 0.4rem;
+  }
+  .workspace {
+    display: grid;
+    grid-template-columns: minmax(14rem, 1fr) minmax(0, 2fr);
+    gap: 2rem;
+    align-items: start;
+  }
+  .collection-list,
+  .editor {
+    background: #fff;
+    border: 1px solid #dedfd8;
+    border-radius: 0.5rem;
+    padding: 1.5rem;
+  }
+  ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  li + li {
+    border-top: 1px solid #e9eae4;
+  }
+  li a {
+    display: block;
+    padding: 0.9rem 0.5rem;
+    text-decoration: none;
+    overflow-wrap: anywhere;
+  }
+  li a[aria-current='page'] {
+    background: #edf2eb;
+    border-radius: 0.25rem;
+  }
+  li span {
+    display: block;
+    font-size: 0.85rem;
+    margin-top: 0.2rem;
+    color: #555b55;
+  }
+  form > label,
+  fieldset > label:not(.checkbox) {
+    display: block;
+    font-weight: 600;
+    margin-top: 1.25rem;
+    margin-bottom: 0.4rem;
+  }
+  input:not([type='hidden']):not([type='checkbox']),
+  textarea,
+  select {
+    box-sizing: border-box;
+    width: 100%;
+    border: 1px solid #959e94;
+    border-radius: 0.25rem;
+    padding: 0.65rem;
+    background: #fff;
+    color: #242424;
+    font: inherit;
+  }
+  textarea {
+    resize: vertical;
+  }
+  input.number {
+    max-width: 10rem;
+  }
+  fieldset {
+    margin: 1.5rem 0;
+    border: 1px solid #dedfd8;
+    border-radius: 0.25rem;
+    padding: 1rem;
+  }
+  legend {
+    font-weight: 600;
+    padding-inline: 0.3rem;
+  }
+  .checkbox {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+  input[type='checkbox'] {
+    width: 1.15rem;
+    height: 1.15rem;
+    accent-color: #315642;
+  }
+  .button {
+    display: inline-block;
+    padding: 0.7rem 1rem;
+    border: 1px solid #315642;
+    border-radius: 0.25rem;
+    background: #315642;
+    color: #fff;
+    text-decoration: none;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  form > .button {
+    margin-top: 1.5rem;
+  }
+  .secondary {
+    background: transparent;
+    color: #315642;
+    white-space: nowrap;
+  }
+  :focus-visible {
+    outline: 3px solid #5478ae;
+    outline-offset: 3px;
+  }
+  .notice {
+    padding: 1rem 1.25rem;
+    border: 1px solid #a0b59a;
+    border-radius: 0.25rem;
+    background: #edf2eb;
+    margin-bottom: 1.5rem;
+  }
+  .notice p {
+    margin: 0 0 0.4rem;
+  }
+  .error {
+    background: #fff1ed;
+    border-color: #bc7565;
+  }
+  .pagination {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 1rem;
+  }
+  .pagination span {
+    flex-basis: 100%;
+  }
+  @media (max-width: 46rem) {
+    .workspace {
+      grid-template-columns: 1fr;
+    }
+    .page-heading {
+      align-items: start;
+      flex-direction: column;
+    }
+  }
+</style>

@@ -22,6 +22,12 @@ export async function writeCatalogueBatch(
     await db.batch(statements);
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
+    if (/invalid_collection_cover/.test(message))
+      throw new CatalogueError(
+        'invalid_input',
+        'Choose a cover from the published photos in this collection.',
+        { cause },
+      );
     if (/invalid_place_(hierarchy|parent_kind)/.test(message))
       throw new CatalogueError(
         'invalid_input',

@@ -65,7 +65,7 @@ describe('local D1 catalogue', () => {
     await applyLocalMigrations(db);
     assert.equal(
       await scalar('SELECT COUNT(*) FROM catalogue_test_migrations'),
-      3,
+      4,
     );
     assert.deepEqual(
       (await db.prepare('PRAGMA foreign_key_check').all()).results,

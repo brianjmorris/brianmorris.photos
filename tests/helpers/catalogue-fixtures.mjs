@@ -17,7 +17,7 @@ export async function seedCatalogue(db, size, { dense = false } = {}) {
       tagJson,
     ),
     statement(
-      `INSERT INTO tag_revisions SELECT json_extract(value, '$.id'), 1, 0,
+      `INSERT INTO tag_revisions (tag_id, revision, created_at, name, normalized_name, slug) SELECT json_extract(value, '$.id'), 1, 0,
       json_extract(value, '$.name'), json_extract(value, '$.normalized'), json_extract(value, '$.slug') FROM json_each(?)`,
       tagJson,
     ),

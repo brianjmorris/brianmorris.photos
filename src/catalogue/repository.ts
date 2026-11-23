@@ -6,7 +6,7 @@ import {
   type PhotoMetadataInput,
   type PublicPhotoMetadata,
 } from './metadata.ts';
-import { validId, validRevision, validTime } from './validation.ts';
+import { text, validId, validRevision, validTime } from './validation.ts';
 import {
   CatalogueError,
   cleanTagName,
@@ -15,6 +15,8 @@ import {
   type PhotoRevision,
   type PublishedMembership,
   type TagRevision,
+  type TagDraftSummary,
+  type CoverChoice,
 } from './model.ts';
 
 const MAX_PHOTO_TAGS = 64;
@@ -177,6 +179,19 @@ export class CatalogueRepository {
     validRevision(revision);
     validTime(now);
     const name = cleanTagName(input.name);
+    const notes = input.notes ?? '';
+    if (typeof notes !== 'string') invalid('Collection notes must be text.');
+    text(notes, 20_000);
+    const featuredOrder = input.featuredOrder ?? null;
+    if (
+      featuredOrder !== null &&
+      (!Number.isSafeInteger(featuredOrder) ||
+        featuredOrder < 0 ||
+        featuredOrder > 1_000_000)
+    )
+      invalid('Featured order must be a whole number from 0 to 1000000.');
+    const coverPhotoId = input.coverPhotoId ?? null;
+    if (coverPhotoId !== null) validId(coverPhotoId);
     if (
       typeof input.slug !== 'string' ||
       input.slug.length > 120 ||
@@ -205,13 +220,16 @@ export class CatalogueRepository {
     return [
       ...aliasStatements,
       this.statement(
-        'INSERT INTO tag_revisions (tag_id, revision, created_at, name, normalized_name, slug) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO tag_revisions (tag_id, revision, created_at, name, normalized_name, slug, notes, featured_order, cover_photo_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
         id,
         revision,
         now,
         name,
         normalizeTagName(name),
         input.slug,
+        notes,
+        featuredOrder,
+        coverPhotoId,
       ),
       this.statement(
         'UPDATE tags SET draft_revision = ? WHERE id = ?',
@@ -242,8 +260,13 @@ export class CatalogueRepository {
   ): Promise<TagRevision> {
     validId(id);
     validRevision(expectedRevision);
-    if (!(await this.getTagDraft(id)))
-      throw new CatalogueError('not_found', 'Tag not found.');
+    const current = await this.getTagDraft(id);
+    if (!current) throw new CatalogueError('not_found', 'Tag not found.');
+    if (current.revision !== expectedRevision)
+      throw new CatalogueError(
+        'conflict',
+        'This collection changed in another window. Reload it before saving.',
+      );
     const revision = expectedRevision + 1;
     await writeCatalogueBatch(
       this.db,
@@ -259,10 +282,17 @@ export class CatalogueRepository {
     validId(id);
     validRevision(revision);
     const row = await this.statement(
-      'SELECT name, slug, created_at FROM tag_revisions WHERE tag_id = ? AND revision = ?',
+      'SELECT name, slug, created_at, notes, featured_order, cover_photo_id FROM tag_revisions WHERE tag_id = ? AND revision = ?',
       id,
       revision,
-    ).first<{ name: string; slug: string; created_at: number }>();
+    ).first<{
+      name: string;
+      slug: string;
+      created_at: number;
+      notes: string;
+      featured_order: number | null;
+      cover_photo_id: string | null;
+    }>();
     if (!row) return null;
     const aliases = await this.statement(
       'SELECT alias FROM tag_aliases WHERE tag_id = ? AND tag_revision = ? ORDER BY normalized_alias',
@@ -276,6 +306,9 @@ export class CatalogueRepository {
       name: row.name,
       slug: row.slug,
       aliases: aliases.results.map((entry) => entry.alias),
+      notes: row.notes,
+      featuredOrder: row.featured_order,
+      coverPhotoId: row.cover_photo_id,
     };
   }
 
@@ -296,6 +329,98 @@ export class CatalogueRepository {
       normalizeTagName(name),
     ).first<{ tag_id: string }>();
     return claim ? this.getTagDraft(claim.tag_id) : null;
+  }
+
+  async listTagDrafts(
+    afterId?: string,
+    limit = 30,
+  ): Promise<{ items: TagDraftSummary[]; nextAfter: string | null }> {
+    if (afterId !== undefined) validId(afterId);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+      invalid('Invalid page size.');
+    const after = afterId
+      ? await this.statement(
+          'SELECT r.normalized_name FROM tags t JOIN tag_revisions r ON r.tag_id = t.id AND r.revision = t.draft_revision WHERE t.id = ?',
+          afterId,
+        ).first<{ normalized_name: string }>()
+      : null;
+    if (afterId && !after)
+      invalid('The collection page is no longer available.');
+    const rows = await this.statement(
+      `SELECT t.id, r.revision, r.name, r.slug, r.featured_order, p.tag_revision AS published_revision
+       FROM tag_revisions r JOIN tags t ON t.id = r.tag_id AND t.draft_revision = r.revision
+       LEFT JOIN published_tags p ON p.tag_id = t.id
+       ${after ? 'WHERE (r.normalized_name, t.id) > (?, ?)' : ''}
+       ORDER BY r.normalized_name, t.id LIMIT ?`,
+      ...(after ? [after.normalized_name, afterId!] : []),
+      limit + 1,
+    ).all<{
+      id: string;
+      revision: number;
+      name: string;
+      slug: string;
+      featured_order: number | null;
+      published_revision: number | null;
+    }>();
+    const items = rows.results.slice(0, limit).map((row) => ({
+      tagId: row.id,
+      revision: row.revision,
+      name: row.name,
+      slug: row.slug,
+      featuredOrder: row.featured_order,
+      publishedRevision: row.published_revision,
+    }));
+    return {
+      items,
+      nextAfter: rows.results.length > limit ? items.at(-1)!.tagId : null,
+    };
+  }
+
+  async listCoverChoices(
+    tagId: string,
+    after?: Pick<PublishedMembership, 'photoId' | 'firstPublishedAt'>,
+    limit = 30,
+  ): Promise<{ items: CoverChoice[]; nextAfter: PublishedMembership | null }> {
+    validId(tagId);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+      invalid('Invalid page size.');
+    if (after) {
+      validId(after.photoId);
+      validTime(after.firstPublishedAt);
+    }
+    const rows = await this.statement(
+      `SELECT p.photo_id, p.photo_revision, p.first_published_at, m.title
+       FROM published_photo_tags p LEFT JOIN photo_metadata_revisions m
+       ON m.photo_id = p.photo_id AND m.photo_revision = p.photo_revision
+       WHERE p.tag_id = ? ${after ? 'AND (p.first_published_at, p.photo_id) < (?, ?)' : ''}
+       ORDER BY p.first_published_at DESC, p.photo_id DESC LIMIT ?`,
+      tagId,
+      ...(after ? [after.firstPublishedAt, after.photoId] : []),
+      limit + 1,
+    ).all<{
+      photo_id: string;
+      photo_revision: number;
+      first_published_at: number;
+      title: string | null;
+    }>();
+    const items = rows.results.slice(0, limit).map((row) => ({
+      photoId: row.photo_id,
+      photoRevision: row.photo_revision,
+      firstPublishedAt: row.first_published_at,
+      title: row.title,
+    }));
+    const last = items.at(-1);
+    return {
+      items,
+      nextAfter:
+        rows.results.length > limit && last
+          ? {
+              photoId: last.photoId,
+              photoRevision: last.photoRevision,
+              firstPublishedAt: last.firstPublishedAt,
+            }
+          : null,
+    };
   }
 
   async getPublishedTag(id: string): Promise<TagRevision | null> {
@@ -344,4 +469,7 @@ export interface TagInput {
   name: string;
   slug: string;
   aliases?: readonly string[];
+  notes?: string;
+  featuredOrder?: number | null;
+  coverPhotoId?: string | null;
 }

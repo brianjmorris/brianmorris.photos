@@ -15,6 +15,22 @@ export interface TagRevision {
   name: string;
   slug: string;
   aliases: string[];
+  notes: string;
+  featuredOrder: number | null;
+  coverPhotoId: string | null;
+}
+
+export interface TagDraftSummary {
+  tagId: string;
+  revision: number;
+  name: string;
+  slug: string;
+  featuredOrder: number | null;
+  publishedRevision: number | null;
+}
+
+export interface CoverChoice extends PublishedMembership {
+  title: string | null;
 }
 
 export interface PublishedMembership {

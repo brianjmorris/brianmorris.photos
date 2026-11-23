@@ -35,11 +35,37 @@ async function extendSchema(db) {
 }
 
 async function seed(catalogue, places, db) {
-  const tag = await catalogue.createTag({
+  // Seed the original schema directly so a populated upgrade does not depend
+  // on newer authoring code being compatible with an unmigrated database.
+  const tag = {
+    tagId: crypto.randomUUID(),
+    revision: 1,
+    createdAt: 100,
     name: 'Migration boats',
     slug: 'migration-boats',
     aliases: ['Migration vessel'],
-  });
+    notes: '',
+    featuredOrder: null,
+    coverPhotoId: null,
+  };
+  await db.batch([
+    db
+      .prepare('INSERT INTO tags (id, created_at) VALUES (?, ?)')
+      .bind(tag.tagId, 100),
+    db
+      .prepare(
+        'INSERT INTO tag_aliases (tag_id, tag_revision, alias, normalized_alias) VALUES (?, 1, ?, ?)',
+      )
+      .bind(tag.tagId, 'Migration vessel', 'migration vessel'),
+    db
+      .prepare(
+        'INSERT INTO tag_revisions (tag_id, revision, created_at, name, normalized_name, slug) VALUES (?, 1, 100, ?, ?, ?)',
+      )
+      .bind(tag.tagId, tag.name, 'migration boats', tag.slug),
+    db
+      .prepare('UPDATE tags SET draft_revision = 1 WHERE id = ?')
+      .bind(tag.tagId),
+  ]);
   const photo = await catalogue.createPhoto([tag.tagId]);
   const place = await places.create({
     name: 'Migration harbour',
@@ -165,7 +191,7 @@ describe('catalogue migration compatibility', () => {
             .prepare('SELECT COUNT(*) AS count FROM catalogue_test_migrations')
             .first()
         ).count,
-        3,
+        4,
       );
       assert.deepEqual(
         (await db.prepare('PRAGMA foreign_key_check').all()).results,
@@ -398,7 +424,7 @@ describe('catalogue migration compatibility', () => {
             .prepare('SELECT COUNT(*) AS count FROM catalogue_test_migrations')
             .first()
         ).count,
-        3,
+        4,
       );
     }, '0002_metadata_places.sql');
   });

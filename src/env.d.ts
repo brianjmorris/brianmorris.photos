@@ -1,4 +1,5 @@
 import type { OwnerIdentity } from './auth/owner.ts';
+import type { CatalogueDatabase } from './catalogue/d1.ts';
 
 declare global {
   namespace App {
@@ -10,6 +11,7 @@ declare global {
     interface Env {
       ACCESS_TEAM_DOMAIN?: string;
       ACCESS_AUDIENCE?: string;
+      CATALOGUE?: CatalogueDatabase;
     }
   }
 }
