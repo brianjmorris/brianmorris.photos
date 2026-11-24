@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import { CatalogueRepository } from '../src/catalogue/repository.ts';
+import { CollectionRepository } from '../src/catalogue/collections.ts';
 import { PlaceRepository } from '../src/catalogue/places.ts';
 import {
   applyLocalMigrations,
@@ -45,8 +46,6 @@ async function seed(catalogue, places, db) {
     slug: 'migration-boats',
     aliases: ['Migration vessel'],
     notes: '',
-    featuredOrder: null,
-    coverPhotoId: null,
   };
   await db.batch([
     db
@@ -107,6 +106,85 @@ async function seed(catalogue, places, db) {
 }
 
 describe('catalogue migration compatibility', () => {
+  it('preserves populated legacy tag editorial records while adding distinct collections without inventing them', async () => {
+    await withCatalogue(async ({ db, catalogue, places }) => {
+      const before = await seed(catalogue, places, db);
+      await db.batch([
+        db
+          .prepare(
+            'INSERT INTO tag_aliases (tag_id, tag_revision, alias, normalized_alias) VALUES (?, 2, ?, ?)',
+          )
+          .bind(before.tag.tagId, 'Legacy alternate', 'legacy alternate'),
+        db
+          .prepare(
+            'INSERT INTO tag_revisions (tag_id, revision, created_at, name, normalized_name, slug, notes, featured_order, cover_photo_id) VALUES (?, 2, 200, ?, ?, ?, ?, 7, ?)',
+          )
+          .bind(
+            before.tag.tagId,
+            'Legacy collection label',
+            'legacy collection label',
+            'legacy-label',
+            'Preserve these tag Notes',
+            before.photo.photoId,
+          ),
+        db
+          .prepare('UPDATE tags SET draft_revision = 2 WHERE id = ?')
+          .bind(before.tag.tagId),
+      ]);
+      const legacy = await db
+        .prepare(
+          'SELECT * FROM tag_revisions WHERE tag_id = ? AND revision = 2',
+        )
+        .bind(before.tag.tagId)
+        .first();
+      await applyLocalMigrations(db);
+      assert.deepEqual(
+        await db
+          .prepare(
+            'SELECT * FROM tag_revisions WHERE tag_id = ? AND revision = 2',
+          )
+          .bind(before.tag.tagId)
+          .first(),
+        legacy,
+      );
+      assert.equal(
+        (await catalogue.getTagDraft(before.tag.tagId)).notes,
+        'Preserve these tag Notes',
+      );
+      assert.deepEqual(
+        (await catalogue.getTagDraft(before.tag.tagId)).aliases,
+        ['Legacy alternate'],
+      );
+      assert.equal(
+        (await db.prepare('SELECT COUNT(*) AS n FROM collections').first()).n,
+        0,
+      );
+      assert.deepEqual(
+        await catalogue.getPublishedTag(before.tag.tagId),
+        before.tag,
+      );
+      const second = await catalogue.createTag({
+        name: 'Second defining tag',
+        slug: 'second-defining-tag',
+      });
+      const collection = await new CollectionRepository(db).createDraft({
+        tagIds: [before.tag.tagId, second.tagId],
+        name: null,
+        notes: 'Independent collection Notes',
+        featuredOrder: null,
+        coverPhotoId: null,
+      });
+      assert.equal(collection.notes, 'Independent collection Notes');
+      assert.equal(
+        (await catalogue.getTagDraft(before.tag.tagId)).notes,
+        'Preserve these tag Notes',
+      );
+      assert.deepEqual(
+        (await db.prepare('PRAGMA foreign_key_check').all()).results,
+        [],
+      );
+    }, '0004_collection_editorial.sql');
+  });
   it('upgrades populated tables with optional columns and retains authoring and public snapshots', async () => {
     await withCatalogue(async ({ db, catalogue, places }) => {
       const before = await seed(catalogue, places, db);
@@ -191,7 +269,7 @@ describe('catalogue migration compatibility', () => {
             .prepare('SELECT COUNT(*) AS count FROM catalogue_test_migrations')
             .first()
         ).count,
-        4,
+        5,
       );
       assert.deepEqual(
         (await db.prepare('PRAGMA foreign_key_check').all()).results,
@@ -424,7 +502,7 @@ describe('catalogue migration compatibility', () => {
             .prepare('SELECT COUNT(*) AS count FROM catalogue_test_migrations')
             .first()
         ).count,
-        4,
+        5,
       );
     }, '0002_metadata_places.sql');
   });

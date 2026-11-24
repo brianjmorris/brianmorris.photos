@@ -1,6 +1,10 @@
 import type { CatalogueDatabase } from '../catalogue/d1.ts';
 import { CatalogueError, invalid } from '../catalogue/model.ts';
-import { CatalogueRepository, type TagInput } from '../catalogue/repository.ts';
+import {
+  CollectionRepository,
+  normalizeCollection,
+  type CollectionInput,
+} from '../catalogue/collections.ts';
 import { validRevision } from '../catalogue/validation.ts';
 
 export class CollectionRequestError extends Error {
@@ -14,6 +18,7 @@ export class CollectionRequestError extends Error {
 export async function readCollectionBody(
   request: Request,
   format: 'json' | 'form',
+  multiple: readonly string[] = [],
 ): Promise<unknown> {
   const expected =
     format === 'json'
@@ -55,9 +60,14 @@ export async function readCollectionBody(
   if (format === 'form') {
     const params = new URLSearchParams(body);
     for (const key of params.keys())
-      if (params.getAll(key).length !== 1)
+      if (!multiple.includes(key) && params.getAll(key).length !== 1)
         invalid('Duplicate form fields are not allowed.');
-    return Object.fromEntries(params);
+    return Object.fromEntries(
+      [...new Set(params.keys())].map((key) => [
+        key,
+        multiple.includes(key) ? params.getAll(key) : params.get(key),
+      ]),
+    );
   }
   try {
     return JSON.parse(body);
@@ -69,14 +79,13 @@ export async function readCollectionBody(
 export function collectionInput(
   value: unknown,
   editing = false,
-): { input: TagInput; expectedRevision?: number } {
+): { input: CollectionInput; expectedRevision?: number } {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     invalid('A collection is required.');
   const data = value as Record<string, unknown>;
   const allowed = [
     'name',
-    'slug',
-    'aliases',
+    'tagIds',
     'notes',
     'featuredOrder',
     'coverPhotoId',
@@ -85,27 +94,19 @@ export function collectionInput(
   if (Object.keys(data).some((key) => !allowed.includes(key)))
     invalid('Unexpected collection field.');
   if (
-    typeof data.name !== 'string' ||
-    typeof data.slug !== 'string' ||
-    !Array.isArray(data.aliases) ||
-    data.aliases.some((alias) => typeof alias !== 'string') ||
+    !(data.name === null || typeof data.name === 'string') ||
+    !Array.isArray(data.tagIds) ||
+    data.tagIds.some((tag) => typeof tag !== 'string') ||
     typeof data.notes !== 'string' ||
     !(data.featuredOrder === null || typeof data.featuredOrder === 'number') ||
     !(data.coverPhotoId === null || typeof data.coverPhotoId === 'string')
   )
     invalid(
-      'Supply the complete collection, including aliases, notes, featured order and cover.',
+      'Supply the defining tags, optional name, Notes, featured order and cover.',
     );
   if (editing) validRevision(data.expectedRevision as number);
   return {
-    input: {
-      name: data.name,
-      slug: data.slug,
-      aliases: data.aliases,
-      notes: data.notes,
-      featuredOrder: data.featuredOrder,
-      coverPhotoId: data.coverPhotoId,
-    },
+    input: normalizeCollection(data as unknown as CollectionInput),
     ...(editing ? { expectedRevision: data.expectedRevision as number } : {}),
   };
 }
@@ -119,11 +120,7 @@ export function collectionError(error: unknown): {
   if (error instanceof CatalogueError)
     return {
       status: { invalid_input: 400, conflict: 409, not_found: 404 }[error.code],
-      message:
-        error.code === 'conflict' &&
-        !error.message.startsWith('This collection changed')
-          ? 'A name, alias, address or revision conflicts with another collection. Check your changes and try again.'
-          : error.message,
+      message: error.message,
     };
   return {
     status: 503,
@@ -134,7 +131,7 @@ export function collectionError(error: unknown): {
 export async function collectionApi(
   owner: unknown,
   db: CatalogueDatabase | undefined,
-  operation: (repository: CatalogueRepository) => Promise<Response>,
+  operation: (repository: CollectionRepository) => Promise<Response>,
 ): Promise<Response> {
   if (!owner)
     return Response.json({ error: 'Sign-in required.' }, { status: 401 });
@@ -147,7 +144,7 @@ export async function collectionApi(
       { status: 503 },
     );
   try {
-    return await operation(new CatalogueRepository(db));
+    return await operation(new CollectionRepository(db));
   } catch (error) {
     const result = collectionError(error);
     return Response.json({ error: result.message }, { status: result.status });

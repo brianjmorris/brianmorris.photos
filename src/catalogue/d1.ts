@@ -25,7 +25,23 @@ export async function writeCatalogueBatch(
     if (/invalid_collection_cover/.test(message))
       throw new CatalogueError(
         'invalid_input',
-        'Choose a cover from the published photos in this collection.',
+        'Choose a published cover photograph with every defining tag.',
+        { cause },
+      );
+    if (
+      /invalid_collection_definition|FOREIGN KEY constraint failed/.test(
+        message,
+      )
+    )
+      throw new CatalogueError(
+        'invalid_input',
+        'A referenced record is missing or the tag combination is invalid.',
+        { cause },
+      );
+    if (/collections.tag_set_key/.test(message))
+      throw new CatalogueError(
+        'conflict',
+        'This tag combination already has a saved draft. Open that combination to edit it.',
         { cause },
       );
     if (/invalid_place_(hierarchy|parent_kind)/.test(message))

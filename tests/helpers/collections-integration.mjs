@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { CatalogueRepository } from '../../src/catalogue/repository.ts';
+import { CollectionRepository } from '../../src/catalogue/collections.ts';
 
-// Exercise the real built Astro pages, transport, auth middleware and D1 together.
 export async function verifyCollectionEditor(
   worker,
   db,
@@ -15,184 +15,277 @@ export async function verifyCollectionEditor(
       headers: { ...identity, ...options.headers },
       redirect: 'manual',
     });
-  const json = (path, method, input, extraHeaders = {}) =>
+  const json = (path, method, input, extra = {}) =>
     send(path, {
       method,
       body: JSON.stringify(input),
+      headers: { 'Content-Type': 'application/json', Origin: origin, ...extra },
+    });
+  const form = (path, input) =>
+    send(path, {
+      method: 'POST',
+      body: new URLSearchParams(input).toString(),
       headers: {
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
         Origin: origin,
-        ...extraHeaders,
       },
     });
-  const input = {
-    name: 'Worker boats',
-    slug: 'worker-boats',
-    aliases: ['Worker vessels'],
-    notes: 'Original notes',
-    featuredOrder: null,
-    coverPhotoId: null,
-  };
-  const count = async () =>
-    (await db.prepare('SELECT COUNT(*) AS count FROM tags').first()).count;
-
-  for (const path of ['/dashboard/collections', '/api/owner/tags']) {
+  for (const path of [
+    '/dashboard/tags',
+    '/dashboard/collections',
+    '/dashboard/photos',
+    '/api/owner/tags',
+    '/api/owner/collections',
+  ]) {
     const denied = await worker.dispatchFetch(origin + path);
     assert.equal(denied.status, 401);
     assertPrivate(denied);
   }
-  const forbidden = await json('/api/owner/tags', 'POST', input, {
+  const tagInput = {
+    name: 'Japan',
+    slug: 'japan',
+    aliases: ['Nippon'],
+    notes: 'Tag Notes',
+  };
+  const forbidden = await json('/api/owner/tags', 'POST', tagInput, {
     Origin: 'https://untrusted.example.test',
   });
   assert.equal(forbidden.status, 403);
   assertPrivate(forbidden);
-  assert.equal(await count(), 0);
-  const created = await json('/api/owner/tags', 'POST', input);
+  const tags = [];
+  for (const input of [
+    tagInput,
+    { name: 'Architecture', slug: 'architecture', aliases: [], notes: '' },
+    { name: 'Night', slug: 'night', aliases: [], notes: '' },
+  ]) {
+    const response = await json('/api/owner/tags', 'POST', input);
+    assert.equal(response.status, 201);
+    assertPrivate(response);
+    tags.push(await response.json());
+  }
+  assert.equal(
+    (await json('/api/owner/tags', 'POST', { ...tagInput, featuredOrder: 1 }))
+      .status,
+    400,
+  );
+  const tagForm = await form('/dashboard/tags', {
+    tagId: tags[0].tagId,
+    expectedRevision: '1',
+    ...tagInput,
+    aliases: 'Nippon',
+    notes: 'Updated tag Notes',
+  });
+  assert.equal(tagForm.status, 303);
+  assertPrivate(tagForm);
+  const input = {
+    tagIds: tags.slice(0, 2).map((t) => t.tagId),
+    name: null,
+    notes: 'Original collection Notes',
+    featuredOrder: null,
+    coverPhotoId: null,
+  };
+  const created = await json('/api/owner/collections', 'POST', input);
   assert.equal(created.status, 201);
   assertPrivate(created);
-  const tag = await created.json();
-  assert.equal(tag.notes, input.notes);
-  const endpoint = `/api/owner/tags/${tag.tagId}`;
-  const pageUrl = `/dashboard/collections?edit=${tag.tagId}`;
-  const listed = await send('/api/owner/tags');
-  assertPrivate(listed);
-  const list = await listed.json();
-  assert.equal(list.items[0].name, input.name);
-  assert(!('notes' in list.items[0]));
-  const initial = await send(pageUrl);
-  assert.equal(initial.status, 200);
-  assertPrivate(initial);
-  assert((await initial.text()).includes('name="expectedRevision" value="1"'));
-
+  const c = await created.json();
+  assert.equal(c.name, null);
+  const endpoint = `/api/owner/collections/${c.collectionId}`,
+    page = `/dashboard/collections?edit=${c.collectionId}`;
+  assert.equal(
+    (
+      await json('/api/owner/collections', 'POST', {
+        ...input,
+        tagIds: [...input.tagIds].reverse(),
+      })
+    ).status,
+    409,
+  );
+  assert.equal(
+    (
+      await json('/api/owner/collections', 'POST', {
+        ...input,
+        tagIds: [tags[0].tagId],
+      })
+    ).status,
+    400,
+  );
+  const namedResponse = await json('/api/owner/collections', 'POST', {
+    ...input,
+    tagIds: tags.slice(1).map((t) => t.tagId),
+    name: 'Architecture at night',
+    notes: '',
+  });
+  assert.equal(namedResponse.status, 201);
+  const named = await namedResponse.json();
+  const nameOnlyForm = await form('/dashboard/collections', {
+    collectionId: '',
+    expectedRevision: '',
+    tagNames: 'Japan\nNight',
+    name: 'Night in Japan',
+    notes: '',
+    featuredOrder: '0',
+    coverPhotoId: '',
+  });
+  assert.equal(nameOnlyForm.status, 303);
+  const nameOnlyPage = await send(nameOnlyForm.headers.get('location'));
+  assert.equal(nameOnlyPage.status, 200);
+  assert((await nameOnlyPage.text()).includes('Notes (optional)'));
+  const renamed = await json(`/api/owner/tags/${tags[0].tagId}`, 'PUT', {
+    ...tagInput,
+    name: 'Japan renamed',
+    slug: 'japan-renamed',
+    aliases: [],
+    notes: 'Updated tag Notes',
+    expectedRevision: 2,
+  });
+  assert.equal(renamed.status, 200);
   const attack =
     'Private </textarea><script>window.collectionAttack=true</script>';
-  const form = {
-    tagId: tag.tagId,
+  const edit = {
+    collectionId: c.collectionId,
     expectedRevision: '1',
-    name: input.name,
-    slug: input.slug,
-    aliases: input.aliases.join('\n'),
+    tagNames: 'Nippon\nArchitecture',
+    name: '',
     notes: attack,
     featuredOrder: '0',
     coverPhotoId: '',
   };
-  const submitted = await send('/dashboard/collections', {
-    method: 'POST',
-    body: new URLSearchParams(form).toString(),
-    headers: {
-      Origin: origin,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-  });
-  assert.equal(submitted.status, 303);
-  assertPrivate(submitted);
-  assert.equal(submitted.headers.get('location'), pageUrl + '&saved=1');
-  const escaped = await send(submitted.headers.get('location'));
-  const html = await escaped.text();
+  const saved = await form('/dashboard/collections', edit);
+  assert.equal(saved.status, 303);
+  assertPrivate(saved);
+  const edited = await send(saved.headers.get('location'));
+  const html = await edited.text();
   assert(html.includes('Draft saved. Published content has not changed.'));
   assert(html.includes('&lt;/textarea&gt;'));
   assert(!html.includes('<script>window.collectionAttack'));
-  const saved = await (await send(endpoint)).json();
-  assert.equal(saved.revision, 2);
-  assert.equal(saved.notes, attack);
-
-  const collision = await json('/api/owner/tags', 'POST', {
-    ...input,
-    name: input.aliases[0],
-    slug: 'colliding-alias',
-    aliases: [],
-  });
-  assert.equal(collision.status, 409);
-  assertPrivate(collision);
-  assert.equal(await count(), 1);
-  const repository = new CatalogueRepository(db);
-  const firstPhoto = await repository.createPhoto([tag.tagId]);
-  const cover = await repository.savePhotoMetadataDraft(firstPhoto.photoId, 1, {
-    title: 'Published harbour photograph',
+  assert(html.includes('Name (optional)'));
+  assert(html.includes('Japan'));
+  assertPrivate(edited);
+  const collectionList = await (await send('/api/owner/collections')).json();
+  assert.equal(collectionList.items.length, 3);
+  assert(collectionList.items.every((x) => !('notes' in x)));
+  assert.equal((await (await send('/api/owner/tags')).json()).items.length, 3);
+  const repository = new CatalogueRepository(db),
+    collections = new CollectionRepository(db);
+  const photo = await repository.createPhoto(tags.map((t) => t.tagId));
+  const cover = await repository.savePhotoMetadataDraft(photo.photoId, 1, {
+    title: 'Published matching photograph',
   });
   await db.batch([
-    db
-      .prepare(
-        'INSERT INTO published_tags (tag_id, tag_revision) VALUES (?, 2)',
-      )
-      .bind(tag.tagId),
+    ...tags.map((tag) =>
+      db
+        .prepare(
+          'INSERT INTO published_tags (tag_id, tag_revision) VALUES (?, ?)',
+        )
+        .bind(tag.tagId, tag.tagId === tags[0].tagId ? 3 : 1),
+    ),
     db
       .prepare(
         'INSERT INTO published_photos (photo_id, photo_revision, first_published_at) VALUES (?, 2, 1000)',
       )
       .bind(cover.photoId),
+    ...tags.map((tag) =>
+      db
+        .prepare(
+          'INSERT INTO published_photo_tags (photo_id, photo_revision, tag_id, first_published_at) VALUES (?, 2, ?, 1000)',
+        )
+        .bind(cover.photoId, tag.tagId),
+    ),
     db
       .prepare(
-        'INSERT INTO published_photo_tags (photo_id, photo_revision, tag_id, first_published_at) VALUES (?, 2, ?, 1000)',
+        'INSERT INTO published_collections (collection_id, collection_revision) VALUES (?, 2)',
       )
-      .bind(cover.photoId, tag.tagId),
+      .bind(c.collectionId),
   ]);
-  const edited = await json(endpoint, 'PUT', {
+  const update = await json(endpoint, 'PUT', {
     ...input,
-    notes: 'New private draft',
-    featuredOrder: 3,
+    name: 'Japan architecture',
+    notes: 'Private new draft',
+    featuredOrder: 0,
     coverPhotoId: cover.photoId,
     expectedRevision: 2,
   });
-  assert.equal(edited.status, 200);
-  assertPrivate(edited);
-  const draft = await edited.json();
-  assert.equal(draft.revision, 3);
-  assert.equal(draft.coverPhotoId, cover.photoId);
-  assert.equal((await repository.getPublishedTag(tag.tagId)).notes, attack);
-  const editor = await send(pageUrl);
-  const editorHtml = await editor.text();
-  assert(editorHtml.includes('Published harbour photograph'));
-  assert(editorHtml.includes('New private draft'));
-  const stale = await send('/dashboard/collections', {
-    method: 'POST',
-    body: new URLSearchParams({
-      ...form,
-      notes: 'Unsaved stale input',
-    }).toString(),
-    headers: {
-      Origin: origin,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
+  assert.equal(update.status, 200);
+  assertPrivate(update);
+  assert.equal((await collections.getPublished(c.collectionId)).notes, attack);
+  assert(
+    (await (await send(page)).text()).includes('Published matching photograph'),
+  );
+  const stale = await form('/dashboard/collections', {
+    ...edit,
+    notes: 'Unsaved stale Notes',
   });
   assert.equal(stale.status, 409);
   assertPrivate(stale);
   const staleHtml = await stale.text();
-  assert(staleHtml.includes('Unsaved stale input'));
+  assert(staleHtml.includes('Unsaved stale Notes'));
   assert(staleHtml.includes('Reload the saved draft'));
-  assert.equal(
-    (await repository.getTagDraft(tag.tagId)).notes,
-    'New private draft',
-  );
-
-  for (const [body, status] of [
-    [{ ...input, expectedRevision: 2 }, 409],
-    [{ ...input, expectedRevision: 3, coverPhotoId: 'not-published' }, 400],
-    [{ ...input, expectedRevision: 3, notes: 'x'.repeat(20001) }, 400],
-    [{ ...input, expectedRevision: 3, publish: true }, 400],
-  ]) {
-    const response = await json(endpoint, 'PUT', body);
-    assert.equal(response.status, status);
-    assertPrivate(response);
-  }
-  assert.equal((await send('/api/owner/tags/nonexistent')).status, 404);
-  const malformed = await send('/api/owner/tags', {
-    method: 'POST',
-    body: '{broken',
-    headers: { Origin: origin, 'Content-Type': 'application/json' },
-  });
-  assert.equal(malformed.status, 400);
-  assertPrivate(malformed);
-  const duplicate = await send('/dashboard/collections', {
-    method: 'POST',
-    body: 'name=One&name=Two',
-    headers: {
-      Origin: origin,
-      'Content-Type': 'application/x-www-form-urlencoded',
+  const untagged = await repository.createPhoto();
+  const initialReview = await send('/dashboard/photos');
+  assert((await initialReview.text()).includes('No tags yet'));
+  const assignment = await json(
+    '/api/owner/photos/assign-collections',
+    'POST',
+    {
+      photos: [{ photoId: untagged.photoId, expectedRevision: 1 }],
+      collectionIds: [c.collectionId, named.collectionId],
     },
-  });
-  assert.equal(duplicate.status, 400);
-  assertPrivate(duplicate);
-  assert.equal((await repository.getPublishedTag(tag.tagId)).revision, 2);
-  assert.equal(await count(), 1);
+  );
+  assert.equal(assignment.status, 200);
+  assertPrivate(assignment);
+  assert.deepEqual(
+    (await repository.getPhotoDraft(untagged.photoId)).tagIds,
+    tags.map((t) => t.tagId).sort(),
+  );
+  const selectionForm = new URLSearchParams();
+  selectionForm.append('photos', `${untagged.photoId}:2`);
+  selectionForm.append('photos', `${cover.photoId}:2`);
+  selectionForm.append('collectionIds', c.collectionId);
+  selectionForm.append('collectionIds', named.collectionId);
+  const applied = await form('/dashboard/photos', selectionForm);
+  assert.equal(applied.status, 303);
+  assertPrivate(applied);
+  const review = await send('/dashboard/photos');
+  assert.equal(review.status, 200);
+  const reviewHtml = await review.text();
+  assert(reviewHtml.includes('Published matching photograph'));
+  assert.match(reviewHtml, /Tags:\s*Architecture, Japan renamed, Night/);
+  const assignedSummary = (await repository.listPhotoDrafts()).items.find(
+    (item) => item.photoId === untagged.photoId,
+  );
+  assert.deepEqual(
+    assignedSummary.tags.map((tag) => tag.name),
+    ['Architecture', 'Japan renamed', 'Night'],
+  );
+  const denial = await json(
+    '/api/owner/photos/assign-collections',
+    'POST',
+    {
+      photos: [{ photoId: cover.photoId, expectedRevision: 3 }],
+      collectionIds: [c.collectionId],
+    },
+    { Origin: 'https://untrusted.example.test' },
+  );
+  assert.equal(denial.status, 403);
+  assert.equal(
+    (
+      await json(endpoint, 'PUT', {
+        ...input,
+        expectedRevision: 3,
+        publish: true,
+      })
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await json('/api/owner/photos/assign-collections', 'POST', {
+        photos: [null],
+        collectionIds: [],
+      })
+    ).status,
+    400,
+  );
+  assert.equal((await send('/api/owner/collections/missing')).status, 404);
+  assert.equal((await collections.getPublished(c.collectionId)).revision, 2);
 }

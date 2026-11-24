@@ -1,0 +1,218 @@
+---
+import { env } from 'cloudflare:workers';
+import EditorLayout from '../../components/dashboard/EditorLayout.astro';
+import { CatalogueRepository } from '../../catalogue/repository.ts';
+import { CatalogueError } from '../../catalogue/model.ts';
+import {
+  readCollectionBody,
+  collectionError,
+} from '../../authoring/collections.ts';
+import { tagInput } from '../../authoring/tags.ts';
+if (!Astro.locals.owner)
+  return new Response('Sign-in required.', { status: 403 });
+if (!['GET', 'HEAD', 'POST'].includes(Astro.request.method))
+  return new Response('Method not allowed.', {
+    status: 405,
+    headers: { Allow: 'GET, HEAD, POST' },
+  });
+const repository = env.CATALOGUE
+  ? new CatalogueRepository(env.CATALOGUE)
+  : null;
+let error = '',
+  available = Boolean(repository);
+let id = Astro.url.searchParams.get('edit') ?? '';
+let values = {
+  name: '',
+  slug: '',
+  aliases: '',
+  notes: '',
+  expectedRevision: '',
+};
+let listing: Awaited<ReturnType<CatalogueRepository['listTagDrafts']>> = {
+  items: [],
+  nextAfter: null,
+};
+if (repository) {
+  if (Astro.request.method === 'POST') {
+    try {
+      const data = (await readCollectionBody(Astro.request, 'form')) as Record<
+        string,
+        string
+      >;
+      if (
+        Object.keys(data).some(
+          (key) => !['tagId', ...Object.keys(values)].includes(key),
+        )
+      )
+        throw new CatalogueError('invalid_input', 'Unexpected tag field.');
+      values = { ...values, ...data };
+      id = data.tagId ?? '';
+      const { input, expectedRevision } = tagInput(
+        {
+          name: values.name,
+          slug: values.slug,
+          aliases: values.aliases
+            .split(/\r?\n/)
+            .map((x) => x.trim())
+            .filter(Boolean),
+          notes: values.notes,
+          ...(id ? { expectedRevision: Number(values.expectedRevision) } : {}),
+        },
+        Boolean(id),
+      );
+      const saved = id
+        ? await repository.saveTagDraft(id, expectedRevision!, input)
+        : await repository.createTag(input);
+      return Astro.redirect(
+        `/dashboard/tags?edit=${encodeURIComponent(saved.tagId)}&saved=1`,
+        303,
+      );
+    } catch (cause) {
+      const result = collectionError(cause);
+      error = result.message;
+      Astro.response.status = result.status;
+    }
+  }
+  try {
+    if (id && Astro.request.method !== 'POST') {
+      const tag = await repository.getTagDraft(id);
+      if (!tag) throw new CatalogueError('not_found', 'Tag not found.');
+      values = {
+        name: tag.name,
+        slug: tag.slug,
+        aliases: tag.aliases.join('\n'),
+        notes: tag.notes,
+        expectedRevision: String(tag.revision),
+      };
+    }
+    listing = await repository.listTagDrafts(
+      Astro.url.searchParams.get('after') ?? undefined,
+    );
+  } catch (cause) {
+    const result = collectionError(cause);
+    if (!error) error = result.message;
+    Astro.response.status = result.status;
+    if (result.status === 503 || result.status === 404) available = false;
+  }
+} else {
+  error = 'Tags are temporarily unavailable.';
+  Astro.response.status = 503;
+}
+---
+
+<EditorLayout title="Tags">
+  <p>Tags describe photographs. Each tag can have its own Notes.</p>
+  {error && (
+    <div class="notice error" role="alert">
+      <p>{error}</p>
+      {Astro.response.status === 409 && (
+        <a
+          href={
+            id
+              ? `/dashboard/tags?edit=${encodeURIComponent(id)}`
+              : '/dashboard/tags'
+          }
+        >
+          Reload the saved draft before trying again
+        </a>
+      )}
+    </div>
+  )}
+  {!error && Astro.url.searchParams.has('saved') && (
+    <p class="notice" role="status">
+      Draft saved. Published content has not changed.
+    </p>
+  )}
+  {available && (
+    <div class="workspace">
+      <section class="panel" aria-labelledby="tags-heading">
+        <h2 id="tags-heading">Tags</h2>
+        <a href="/dashboard/tags">New tag</a>
+        <ul class="records">
+          {listing.items.map((tag) => (
+            <li>
+              <a
+                href={`/dashboard/tags?edit=${encodeURIComponent(tag.tagId)}`}
+                aria-current={id === tag.tagId ? 'page' : undefined}
+              >
+                {tag.name}
+                <span class="status">
+                  {tag.publishedRevision === null
+                    ? 'Unpublished'
+                    : tag.publishedRevision === tag.revision
+                      ? 'Published'
+                      : 'Draft changes'}
+                </span>
+              </a>
+            </li>
+          ))}
+        </ul>
+        {!listing.items.length && <p>No tags yet.</p>}
+        <nav aria-label="Tag pages">
+          {Astro.url.searchParams.has('after') && (
+            <a href="/dashboard/tags">First page</a>
+          )}
+          {listing.nextAfter && (
+            <a
+              href={`/dashboard/tags?after=${encodeURIComponent(listing.nextAfter)}`}
+            >
+              Next tags
+            </a>
+          )}
+        </nav>
+      </section>
+      <section class="panel" aria-labelledby="editor-heading">
+        <h2 id="editor-heading">{id ? 'Edit tag' : 'New tag'}</h2>
+        <form method="post" action="/dashboard/tags">
+          <input type="hidden" name="tagId" value={id} />
+          <input
+            type="hidden"
+            name="expectedRevision"
+            value={values.expectedRevision}
+          />
+          <label for="name">Tag name</label>
+          <input
+            id="name"
+            name="name"
+            value={values.name}
+            required
+            maxlength="120"
+          />
+          <label for="slug">Tag address</label>
+          <input
+            id="slug"
+            name="slug"
+            value={values.slug}
+            required
+            maxlength="120"
+            pattern="[a-z0-9]+(-[a-z0-9]+)*"
+            aria-describedby="slug-help"
+          />
+          <p class="hint" id="slug-help">
+            Lowercase letters, numbers and hyphens. Earlier addresses remain
+            reserved.
+          </p>
+          <label for="aliases">Alternate names</label>
+          <textarea
+            id="aliases"
+            name="aliases"
+            rows="3"
+            maxlength="4000"
+            aria-describedby="aliases-help"
+          >{values.aliases}</textarea>
+          <p class="hint" id="aliases-help">
+            One per line, up to 32. Each name or alias identifies one tag.
+          </p>
+          <label for="notes">Notes</label>
+          <textarea
+            id="notes"
+            name="notes"
+            rows="9"
+            maxlength="20000"
+          >{values.notes}</textarea>
+          <button type="submit">Save tag draft</button>
+        </form>
+      </section>
+    </div>
+  )}
+</EditorLayout>

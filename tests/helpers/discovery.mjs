@@ -80,17 +80,18 @@ export function discoverySource(db) {
         ? [{ kind: 'place', id: query.filters.placeId }]
         : []),
     ];
-    const values = candidates.flatMap((ref) => [ref.kind, ref.id]);
-    const driver = `SELECT kind, id FROM discovery_test_collections
-      WHERE (kind, id) IN (${candidates.map(() => '(?, ?)').join(',')})
-      ORDER BY photo_count, kind, id LIMIT 1`;
+    // JSON keeps the parameter count constant even for 64-tag selections.
+    const encoded = JSON.stringify(candidates);
+    const values = [encoded];
+    const driver = `SELECT c.kind, c.id FROM discovery_test_collections c JOIN json_each(?) selected
+      ON c.kind = json_extract(selected.value, '$.kind') AND c.id = json_extract(selected.value, '$.id')
+      ORDER BY c.photo_count, c.kind, c.id LIMIT 1`;
     let predicate =
       'm.kind = (SELECT kind FROM driver) AND m.collection_id = (SELECT id FROM driver)';
-    for (const ref of candidates) {
-      predicate +=
-        ' AND EXISTS (SELECT 1 FROM discovery_test_members f WHERE f.kind = ? AND f.collection_id = ? AND f.photo_id = m.photo_id)';
-      values.push(ref.kind, ref.id);
-    }
+    predicate += ` AND NOT EXISTS (SELECT 1 FROM json_each(?) selected WHERE NOT EXISTS (
+      SELECT 1 FROM discovery_test_members f WHERE f.kind = json_extract(selected.value, '$.kind')
+      AND f.collection_id = json_extract(selected.value, '$.id') AND f.photo_id = m.photo_id))`;
+    values.push(encoded);
     const position = '(m.first_published_at, m.photo_id)';
     let window;
     if (seek.kind === 'anchor') {

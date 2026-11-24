@@ -1,13 +1,10 @@
 import { env } from 'cloudflare:workers';
 import type { APIRoute } from 'astro';
-import {
-  collectionApi,
-  collectionInput,
-  readCollectionBody,
-} from '../../../../authoring/collections.ts';
+import { readCollectionBody } from '../../../../authoring/collections.ts';
+import { tagApi, tagInput } from '../../../../authoring/tags.ts';
 
 export const GET: APIRoute = ({ locals, url }) =>
-  collectionApi(locals.owner, env.CATALOGUE, async (repository) =>
+  tagApi(locals.owner, env.CATALOGUE, async (repository) =>
     Response.json(
       await repository.listTagDrafts(
         url.searchParams.get('after') ?? undefined,
@@ -16,9 +13,7 @@ export const GET: APIRoute = ({ locals, url }) =>
   );
 
 export const POST: APIRoute = ({ locals, request }) =>
-  collectionApi(locals.owner, env.CATALOGUE, async (repository) => {
-    const { input } = collectionInput(
-      await readCollectionBody(request, 'json'),
-    );
+  tagApi(locals.owner, env.CATALOGUE, async (repository) => {
+    const { input } = tagInput(await readCollectionBody(request, 'json'));
     return Response.json(await repository.createTag(input), { status: 201 });
   });

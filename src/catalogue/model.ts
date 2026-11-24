@@ -16,8 +16,6 @@ export interface TagRevision {
   slug: string;
   aliases: string[];
   notes: string;
-  featuredOrder: number | null;
-  coverPhotoId: string | null;
 }
 
 export interface TagDraftSummary {
@@ -25,7 +23,6 @@ export interface TagDraftSummary {
   revision: number;
   name: string;
   slug: string;
-  featuredOrder: number | null;
   publishedRevision: number | null;
 }
 
