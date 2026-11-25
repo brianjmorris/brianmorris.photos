@@ -24,4 +24,4 @@ Open <http://127.0.0.1:4321>.
 | `npm run check`   | Run Astro and TypeScript checks.                   |
 | `npm run build`   | Create a production build.                         |
 | `npm run preview` | Preview the production build locally.              |
-| `npm run verify`  | Run formatting checks, type checks, and the build. |
+| `npm run verify`  | Check formatting and types, run tests, then build. |
