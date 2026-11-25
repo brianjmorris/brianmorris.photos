@@ -36,6 +36,7 @@ export async function verifyCollectionEditor(
     '/dashboard/photos',
     '/api/owner/tags',
     '/api/owner/collections',
+    '/api/owner/photos',
   ]) {
     const denied = await worker.dispatchFetch(origin + path);
     assert.equal(denied.status, 401);
@@ -167,6 +168,56 @@ export async function verifyCollectionEditor(
   assert.equal((await (await send('/api/owner/tags')).json()).items.length, 3);
   const repository = new CatalogueRepository(db),
     collections = new CollectionRepository(db);
+  const draftId = crypto.randomUUID();
+  const draftBody = {
+    photos: [
+      {
+        photoId: draftId,
+        title: 'Local review draft',
+        tagIds: [tags[0].tagId],
+      },
+    ],
+  };
+  const draftResponse = await json('/api/owner/photos', 'POST', draftBody);
+  assert.equal(draftResponse.status, 201);
+  assertPrivate(draftResponse);
+  const draftPage = await draftResponse.json();
+  assert.equal(draftPage.items[0].photoId, draftId);
+  assert.equal(draftPage.items[0].tags[0].name, 'Japan renamed');
+  const repeated = await json('/api/owner/photos', 'POST', draftBody);
+  assert.equal(repeated.status, 201);
+  assert.equal((await repeated.json()).items[0].photoId, draftId);
+  const loaded = await send(`/api/owner/photos?ids=${draftId}`);
+  assert.equal(loaded.status, 200);
+  assertPrivate(loaded);
+  assert.equal((await loaded.json()).items[0].title, 'Local review draft');
+  assert.equal(
+    (
+      await json('/api/owner/photos', 'POST', draftBody, {
+        Origin: 'https://untrusted.example.test',
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await json('/api/owner/photos', 'POST', {
+        photos: [{ ...draftBody.photos[0], file: 'private-image-data' }],
+      })
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await send('/api/owner/photos', {
+        method: 'POST',
+        body: 'fake JPEG bytes',
+        headers: { Origin: origin, 'Content-Type': 'image/jpeg' },
+      })
+    ).status,
+    415,
+  );
+  assert.equal(await repository.getPublishedPhotoMetadata(draftId), null);
   const photo = await repository.createPhoto(tags.map((t) => t.tagId));
   const cover = await repository.savePhotoMetadataDraft(photo.photoId, 1, {
     title: 'Published matching photograph',

@@ -124,6 +124,52 @@ export class CatalogueRepository {
     return this.photoResult(id, result.at(-1)!.results[0])!;
   }
 
+  // Client-generated UUIDs keep a retried creation request attached to the same
+  // local item. Existing drafts are returned, never overwritten by a retry.
+  async createPhotoDraftBatch(items: readonly NewPhotoDraft[]) {
+    if (!Array.isArray(items) || !items.length || items.length > 30)
+      invalid('Choose between 1 and 30 photographs.');
+    const seen = new Set<string>();
+    const statements = [];
+    const now = Date.now();
+    for (const item of items) {
+      if (
+        !item ||
+        typeof item !== 'object' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+          item.photoId,
+        )
+      )
+        invalid('Each local photograph needs a unique draft identifier.');
+      if (seen.has(item.photoId)) invalid('Choose each photograph only once.');
+      seen.add(item.photoId);
+      text(item.title, 300);
+      // Validate every item before any writes, including idempotent retries.
+      const content = this.photoStatements(item.photoId, 1, item.tagIds, now, {
+        title: item.title,
+      });
+      if (!(await this.getPhotoDraft(item.photoId)))
+        statements.push(
+          this.statement(
+            'INSERT INTO photos (id, created_at) VALUES (?, ?)',
+            item.photoId,
+            now,
+          ),
+          ...content,
+        );
+    }
+    const results = await writeCatalogueBatch(this.db, [
+      ...statements,
+      ...items.map((item) => this.photoRead(item.photoId)),
+    ]);
+    return items.map((item, index) =>
+      this.photoResult(
+        item.photoId,
+        results[statements.length + index].results[0],
+      )!,
+    );
+  }
+
   async savePhotoDraft(
     id: string,
     expectedRevision: number,
@@ -206,10 +252,19 @@ export class CatalogueRepository {
     );
   }
 
-  async listPhotoDrafts(afterId?: string, limit = 30) {
+  async listPhotoDrafts(
+    afterId?: string,
+    limit = 30,
+    photoIds?: readonly string[],
+  ) {
     if (afterId !== undefined) validId(afterId);
     if (!Number.isInteger(limit) || limit < 1 || limit > 30)
       invalid('Invalid page size.');
+    if (photoIds) {
+      if (!photoIds.length || photoIds.length > 30)
+        invalid('Choose between 1 and 30 photographs.');
+      photoIds.forEach(validId);
+    }
     const rows = await this.statement(
       `SELECT p.id, p.draft_revision, m.title,
       (SELECT json_group_array(json_object('tagId', tagged.tag_id, 'name', tagged.name)) FROM (
@@ -220,8 +275,9 @@ export class CatalogueRepository {
         ORDER BY tr.name COLLATE NOCASE, pt.tag_id
       ) tagged) AS tags_json FROM photos p
       LEFT JOIN photo_metadata_states m ON m.photo_id = p.id AND m.photo_revision = p.draft_revision
-      WHERE p.draft_revision IS NOT NULL ${afterId ? 'AND p.id > ?' : ''} ORDER BY p.id LIMIT ?`,
+      WHERE p.draft_revision IS NOT NULL ${afterId ? 'AND p.id > ?' : ''} ${photoIds ? 'AND p.id IN (SELECT value FROM json_each(?))' : ''} ORDER BY p.id LIMIT ?`,
       ...(afterId ? [afterId] : []),
+      ...(photoIds ? [JSON.stringify(photoIds)] : []),
       limit + 1,
     ).all<{
       id: string;
@@ -579,4 +635,10 @@ export interface TagInput {
 export interface PhotoDraftSelection {
   photoId: string;
   expectedRevision: number;
+}
+
+export interface NewPhotoDraft {
+  photoId: string;
+  title: string | null;
+  tagIds: readonly string[];
 }
