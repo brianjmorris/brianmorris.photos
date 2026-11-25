@@ -1,9 +1,14 @@
+import type { ExifCapture } from './jpeg-input.ts';
+import type { Coordinates } from '../catalogue/validation.ts';
+
 export interface LocalPreview {
   hash: string;
   preview: Blob;
   thumbnail: Blob;
   width: number;
   height: number;
+  capture: ExifCapture | null;
+  gps: Coordinates | null;
 }
 
 export function previewFile(

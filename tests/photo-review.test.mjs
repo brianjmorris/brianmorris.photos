@@ -66,6 +66,12 @@ describe('local photograph selection', () => {
       hash: 'private-fingerprint',
       previewUrl: 'blob:private-preview',
       thumbnailUrl: 'blob:private-thumb',
+      capture: {
+        dateTime: '2024:11:03 01:30:00',
+        subseconds: '040',
+        offset: null,
+      },
+      gps: { latitude: 43.6, longitude: -79.4 },
       source: { GPSLatitude: 42 },
     };
     assert.deepEqual(

@@ -22,6 +22,16 @@ export interface CaptureTimeInput {
   clockCorrectionSeconds?: number;
   correctionReason?: string | null;
 }
+
+export type CaptureEdit = Pick<
+  CaptureTimeInput,
+  | 'precision'
+  | 'localDate'
+  | 'localTime'
+  | 'subseconds'
+  | 'offsetMinutes'
+  | 'timeZone'
+>;
 export interface CaptureTime {
   precision: CaptureTimeInput['precision'];
   localDate: string | null;

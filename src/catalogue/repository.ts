@@ -1,4 +1,8 @@
-import { writeCatalogueBatch, type CatalogueDatabase } from './d1.ts';
+import {
+  writeCatalogueBatch,
+  type CatalogueDatabase,
+  type CatalogueStatement,
+} from './d1.ts';
 import {
   metadataStatement,
   metadataJsonSql,
@@ -6,9 +10,15 @@ import {
   readPublishedPhotoMetadata,
   readPublishedPhotoPlace,
   readDraftPhotoPlace,
+  normalizeCapture,
+  type CaptureEdit,
   type PhotoMetadataInput,
   type PublicPhotoMetadata,
 } from './metadata.ts';
+import {
+  SourceMetadataRepository,
+  type SourceEvidenceInput,
+} from './sources.ts';
 import { text, validId, validRevision, validTime } from './validation.ts';
 import {
   CatalogueError,
@@ -247,6 +257,105 @@ export class CatalogueRepository {
       this.photoRead(id),
     ]);
     return this.photoResult(id, result.at(-1)!.results[0])!;
+  }
+
+  async getPhotoCaptureDraft(id: string) {
+    const photo = await this.getPhotoDraft(id);
+    if (!photo) throw new CatalogueError('not_found', 'Photograph not found.');
+    return this.captureDraft(photo);
+  }
+
+  private async captureDraft(photo: PhotoRevision) {
+    const sourceId = photo.metadata?.sourceId;
+    const source = sourceId
+      ? await new SourceMetadataRepository(this.db).get(sourceId)
+      : null;
+    return {
+      photoId: photo.photoId,
+      revision: photo.revision,
+      capture: photo.metadata?.capture ?? normalizeCapture(),
+      original: source
+        ? {
+            dateTime: source.captureText,
+            subseconds: source.captureSubseconds,
+            offset: source.captureOffsetText,
+          }
+        : null,
+    };
+  }
+
+  async savePhotoCaptureDraft(
+    id: string,
+    expectedRevision: number,
+    input: CaptureEdit,
+    original?: SourceEvidenceInput,
+    now = Date.now(),
+  ) {
+    validRevision(expectedRevision);
+    const current = await this.getPhotoDraft(id);
+    if (!current)
+      throw new CatalogueError('not_found', 'Photograph not found.');
+    if (current.revision !== expectedRevision)
+      throw new CatalogueError('conflict', 'The saved draft changed.');
+    const metadata = current.metadata;
+    const previous = metadata?.capture;
+    const offsetMinutes = input.offsetMinutes ?? null;
+    const timeZone =
+      input.timeZone === undefined
+        ? (previous?.timeZone ?? null)
+        : input.timeZone;
+    const capture = normalizeCapture({
+      ...previous,
+      precision: input.precision,
+      localDate: input.localDate ?? null,
+      localTime: input.localTime ?? null,
+      subseconds: input.subseconds ?? null,
+      offsetMinutes,
+      timeZone,
+      offsetSource:
+        (offsetMinutes !== null || timeZone !== null) &&
+        (offsetMinutes !== previous?.offsetMinutes ||
+          timeZone !== previous?.timeZone)
+          ? 'Owner confirmed'
+          : offsetMinutes !== null || timeZone !== null
+            ? previous?.offsetSource
+            : null,
+      ...(input.precision === 'unknown'
+        ? {
+            timeZone: null,
+            offsetSource: null,
+            clockCorrectionSeconds: 0,
+            correctionReason: null,
+          }
+        : {}),
+    });
+    const sources = new SourceMetadataRepository(this.db);
+    let sourceId = metadata?.sourceId ?? null;
+    const writes: CatalogueStatement[] = [];
+    if (original) {
+      if (sourceId) {
+        const source = await sources.get(sourceId);
+        if (source?.sha256 !== original.sha256)
+          invalid('The selected JPEG differs from the draft’s saved source.');
+      } else {
+        const prepared = sources.prepareRecord(id, original, now);
+        sourceId = await sources.findId(id, original);
+        if (!sourceId) {
+          sourceId = prepared.id;
+          writes.push(prepared.statement);
+        }
+      }
+    }
+    const result = await writeCatalogueBatch(this.db, [
+      ...writes,
+      ...this.photoStatements(id, expectedRevision + 1, current.tagIds, now, {
+        ...metadata,
+        capture,
+        sourceId,
+      }),
+      this.photoRead(id),
+    ]);
+    return this.captureDraft(this.photoResult(id, result.at(-1)!.results[0])!);
   }
 
   // One transaction adds a union of required tags to every selected draft.
@@ -750,6 +859,10 @@ export interface PhotoDraftSelection {
   photoId: string;
   expectedRevision: number;
 }
+
+export type PhotoCaptureDraft = Awaited<
+  ReturnType<CatalogueRepository['getPhotoCaptureDraft']>
+>;
 
 export interface NewPhotoDraft {
   photoId: string;

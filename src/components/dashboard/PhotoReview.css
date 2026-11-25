@@ -227,6 +227,132 @@
   font-size: 0.8rem;
   color: var(--muted);
 }
+.capture-details {
+  border-bottom: 1px solid var(--line);
+  font-size: 0.85rem;
+}
+.capture-details summary {
+  cursor: pointer;
+  font-weight: 650;
+  padding: 0.8rem 0;
+}
+.capture-details dl {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  gap: 0.4rem 0.75rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.capture-details dd {
+  margin: 0;
+}
+.capture-details dt,
+.capture-details p {
+  color: var(--muted);
+}
+.capture-details p {
+  margin: 0.55rem 0 0.8rem;
+}
+.photo-review button.edit-capture {
+  margin: 0.45rem 0 0;
+}
+.capture-editor {
+  width: min(34rem, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
+  padding: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  color: var(--ink);
+  background: #fff;
+}
+.capture-editor::backdrop {
+  background: #17201bbd;
+}
+.capture-editor fieldset {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 0.75rem;
+  margin: 1rem 0;
+  border: 1px solid var(--line);
+}
+.capture-editor label {
+  display: grid;
+  align-content: start;
+  gap: 0.25rem;
+}
+.capture-editor p {
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+.capture-editor input,
+.capture-editor select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 0.45rem;
+  font: inherit;
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+}
+.capture-editor .capture-error {
+  color: #9b211f;
+}
+.embedded-date-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.embedded-date-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem 0.7rem;
+  padding: 0.35rem 0;
+  overflow-wrap: anywhere;
+}
+.capture-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.capture-actions .capture-download {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0.65rem 0.8rem;
+  border-radius: 0.3rem;
+  color: #fff;
+  background: var(--ink);
+  font-weight: 600;
+}
+.photo-processing-log ol {
+  display: grid;
+  gap: 0.65rem;
+  padding-left: 1.4rem;
+  margin: 0.5rem 0 0.9rem;
+}
+.photo-processing-log time {
+  display: block;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.photo-processing-log .processing-fields summary {
+  padding: 0.4rem 0;
+}
+.photo-processing-log .processing-fields dl {
+  display: block;
+  padding-left: 0.75rem;
+  border-left: 1px solid var(--line);
+}
+.photo-processing-log .processing-fields dl > div + div {
+  margin-top: 0.35rem;
+}
 .batch-toolbar {
   display: flex;
   align-items: center;

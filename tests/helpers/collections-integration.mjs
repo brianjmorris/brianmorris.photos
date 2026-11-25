@@ -38,6 +38,7 @@ export async function verifyCollectionEditor(
     '/api/owner/tags/search?q=Nippon',
     '/api/owner/collections',
     '/api/owner/photos',
+    '/api/owner/photos/capture',
   ]) {
     const denied = await worker.dispatchFetch(origin + path);
     assert.equal(denied.status, 401);
@@ -229,6 +230,96 @@ export async function verifyCollectionEditor(
       })
     ).status,
     415,
+  );
+  const capturePath = '/api/owner/photos/capture';
+  const captureDraft = {
+    photoId: draftId,
+    expectedRevision: draftPage.items[0].revision,
+    capture: {
+      precision: 'second',
+      localDate: '2024-11-03',
+      localTime: '01:40:00',
+      subseconds: '040',
+      offsetMinutes: null,
+    },
+    original: {
+      sha256: 'a'.repeat(64),
+      originalFilename: 'private-synthetic-source.jpg',
+      dateTime: '2024:11:03 01:30:00',
+      subseconds: '040',
+      offset: null,
+    },
+  };
+  assert.equal(
+    (
+      await json(capturePath, 'POST', captureDraft, {
+        Origin: 'https://untrusted.example.test',
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await json(capturePath, 'POST', {
+        ...captureDraft,
+        original: { ...captureDraft.original, gps: [1, 2] },
+      })
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await json(capturePath, 'POST', {
+        ...captureDraft,
+        capture: { ...captureDraft.capture, localTime: '24:00:00' },
+      })
+    ).status,
+    400,
+  );
+  const captured = await json(capturePath, 'POST', captureDraft);
+  assert.equal(captured.status, 200);
+  assertPrivate(captured);
+  const savedCapture = await captured.json();
+  assert.equal(savedCapture.capture.localTime, '01:40:00');
+  assert.equal(savedCapture.capture.utcInstant, null);
+  assert.deepEqual(savedCapture.original, {
+    dateTime: '2024:11:03 01:30:00',
+    subseconds: '040',
+    offset: null,
+  });
+  const reopened = await send(`${capturePath}?photoId=${draftId}`);
+  assertPrivate(reopened);
+  assert.deepEqual(await reopened.json(), savedCapture);
+  assert(
+    !JSON.stringify(savedCapture).includes(
+      captureDraft.original.originalFilename,
+    ),
+  );
+  assert(!JSON.stringify(savedCapture).includes(captureDraft.original.sha256));
+  assert.equal((await json(capturePath, 'POST', captureDraft)).status, 409);
+  const namedCapture = {
+    photoId: draftId,
+    expectedRevision: savedCapture.revision,
+    capture: { ...captureDraft.capture, timeZone: 'America/Toronto' },
+  };
+  assert.equal((await json(capturePath, 'POST', namedCapture)).status, 400);
+  assert.equal(
+    (
+      await json(capturePath, 'POST', {
+        ...namedCapture,
+        capture: { ...namedCapture.capture, offsetMinutes: -360 },
+      })
+    ).status,
+    400,
+  );
+  const namedSaved = await json(capturePath, 'POST', {
+    ...namedCapture,
+    capture: { ...namedCapture.capture, offsetMinutes: -300 },
+  });
+  assert.equal(namedSaved.status, 200);
+  assert.equal(
+    (await namedSaved.json()).capture.utcInstant,
+    '2024-11-03T06:40:00.040Z',
   );
   assert.equal(await repository.getPublishedPhotoMetadata(draftId), null);
   const photo = await repository.createPhoto(tags.map((t) => t.tagId));

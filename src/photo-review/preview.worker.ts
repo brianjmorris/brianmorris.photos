@@ -1,7 +1,6 @@
 import { inspectJpeg } from './jpeg-input.ts';
 
-// Preview-only, one file at a time. No fetch, upload, metadata extraction or
-// publication derivatives. Originals never leave this worker's local input.
+// Local review only, one file at a time, with no network or publication work.
 globalThis.onmessage = async (
   event: MessageEvent<{ id: string; file: File }>,
 ) => {
@@ -59,6 +58,8 @@ globalThis.onmessage = async (
       thumbnail,
       width: sourceWidth,
       height: sourceHeight,
+      capture: header.capture,
+      gps: header.gps,
     });
   } catch (cause) {
     globalThis.postMessage({

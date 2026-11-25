@@ -1,4 +1,6 @@
 import { normalizeTagName } from '../catalogue/model.ts';
+import type { ExifCapture } from './jpeg-input.ts';
+import type { Coordinates } from '../catalogue/validation.ts';
 
 export interface ReviewTag {
   tagId: string;
@@ -20,12 +22,15 @@ export interface ReviewItem extends ReviewDraft {
   origin: 'local' | 'saved';
   saved: boolean;
   proposedTags?: string[];
+  file?: File;
   fileName?: string;
   hash?: string;
   thumbnailUrl?: string;
   previewUrl?: string;
   width?: number;
   height?: number;
+  capture?: ExifCapture | null;
+  gps?: Coordinates | null;
 }
 
 export function addProposedTags(

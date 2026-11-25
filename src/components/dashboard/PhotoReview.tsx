@@ -1,4 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
+import type { CaptureEdit } from '../../catalogue/metadata.ts';
+import type { PhotoCaptureDraft } from '../../catalogue/repository.ts';
+import type { ExifCapture } from '../../photo-review/jpeg-input.ts';
+import type {
+  DateFieldResult,
+  ProcessingEvent,
+} from '../../photo-review/processing-log.ts';
+import { formatOffset } from '../../photo-review/jpeg-date-tags.ts';
 import {
   addProposedTags,
   addRequiredTags,
@@ -13,8 +21,12 @@ import {
   type ReviewTag,
 } from '../../photo-review/model.ts';
 import { previewFile } from '../../photo-review/preview.ts';
+import PhotoCaptureEditor, { OriginalCapture } from './PhotoCaptureEditor.tsx';
+import PhotoProcessingLog from './PhotoProcessingLog.tsx';
 import TagPicker, { type ChosenTag } from './TagPicker.tsx';
 import './PhotoReview.css';
+
+const processingKey = 'photo-review-processing-v1';
 
 interface Props {
   initialPhotos: ReviewDraft[];
@@ -83,6 +95,17 @@ export default function PhotoReview(props: Props) {
     [error, setError] = useState('');
   const [failures, setFailures] = useState<string[]>([]),
     [conflict, setConflict] = useState(false);
+  const [editingCapture, setEditingCapture] = useState<{
+    title: string | null;
+    draft: PhotoCaptureDraft;
+    gpsZone: string | null;
+    file?: File;
+    original?: ExifCapture & { sha256: string; originalFilename: string };
+  } | null>(null);
+  const [processing, setProcessing] = useState<Record<
+    string,
+    ProcessingEvent[]
+  > | null>(null);
   const input = useRef<HTMLInputElement>(null),
     attach = useRef<HTMLInputElement>(null),
     dialog = useRef<HTMLDialogElement>(null);
@@ -137,6 +160,26 @@ export default function PhotoReview(props: Props) {
     [],
   );
   useEffect(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(processingKey) ?? '{}');
+      setProcessing(
+        saved && typeof saved === 'object' && !Array.isArray(saved)
+          ? saved
+          : {},
+      );
+    } catch {
+      setProcessing({});
+    }
+  }, []);
+  useEffect(() => {
+    if (!processing) return;
+    try {
+      sessionStorage.setItem(processingKey, JSON.stringify(processing));
+    } catch {
+      // The in-memory log still works if tab storage is unavailable or full.
+    }
+  }, [processing]);
+  useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
       event.preventDefault();
     };
@@ -148,6 +191,18 @@ export default function PhotoReview(props: Props) {
     setNotice('');
     setError('');
     setConflict(false);
+  }
+  function logProcessing(
+    photoId: string,
+    message: string,
+    dates?: DateFieldResult[],
+    time = Date.now(),
+  ) {
+    const event = { time, message, ...(dates ? { dates } : {}) };
+    setProcessing((current) => ({
+      ...current,
+      [photoId]: [...(current?.[photoId] ?? []), event],
+    }));
   }
   function ownUrl(blob: Blob) {
     const url = URL.createObjectURL(blob);
@@ -221,6 +276,7 @@ export default function PhotoReview(props: Props) {
     try {
       for (const [index, file] of batch.entries()) {
         setProgress(`Preparing ${index + 1} of ${batch.length}…`);
+        const started = Date.now();
         try {
           const preview = await previewFile(file, abort.current.signal);
           if (!mounted.current) return;
@@ -228,15 +284,43 @@ export default function PhotoReview(props: Props) {
             throw new Error('Choose the same original file for this draft.');
           if (!target && hashes.has(preview.hash)) {
             errors.push(`${file.name}: already in this local batch.`);
+            const duplicate = [...items, ...added].find(
+              (item) => item.origin === 'local' && item.hash === preview.hash,
+            );
+            if (duplicate)
+              logProcessing(
+                duplicate.photoId,
+                'Skipped a duplicate local selection.',
+              );
             continue;
           }
+          const photoId = target?.photoId ?? crypto.randomUUID();
+          logProcessing(photoId, 'Opened the local JPEG.', undefined, started);
+          logProcessing(
+            photoId,
+            'Validated the JPEG and generated a preview and thumbnail.',
+          );
+          logProcessing(
+            photoId,
+            preview.capture
+              ? 'Read original capture EXIF.'
+              : 'Found no readable capture EXIF.',
+          );
+          if (preview.gps)
+            logProcessing(
+              photoId,
+              'Found GPS coordinates for local timezone lookup.',
+            );
           const image = {
+            file,
             fileName: file.name,
             hash: preview.hash,
             thumbnailUrl: ownUrl(preview.thumbnail),
             previewUrl: ownUrl(preview.preview),
             width: preview.width,
             height: preview.height,
+            capture: preview.capture,
+            gps: preview.gps,
           };
           if (target) {
             release(target);
@@ -247,7 +331,7 @@ export default function PhotoReview(props: Props) {
             );
           } else {
             const item: ReviewItem = {
-              photoId: crypto.randomUUID(),
+              photoId,
               revision: 1,
               title: file.name.replace(/\.[^.]+$/, '').slice(0, 300),
               tags: [],
@@ -259,6 +343,11 @@ export default function PhotoReview(props: Props) {
             hashes.add(preview.hash);
           }
         } catch (cause) {
+          if (target)
+            logProcessing(
+              target.photoId,
+              `Local file preparation failed. ${cause instanceof Error ? cause.message : ''}`.trim(),
+            );
           if (mounted.current)
             errors.push(
               `${file.name}: ${cause instanceof Error ? cause.message : 'Preview unavailable.'}`,
@@ -341,6 +430,13 @@ export default function PhotoReview(props: Props) {
       setNotice(
         `Tags added to ${selection.length} ${selection.length === 1 ? 'photograph' : 'photographs'}.${unsaved.length ? ' Save the new draft details when ready.' : ''}`,
       );
+      for (const item of selection)
+        logProcessing(
+          item.photoId,
+          item.saved
+            ? 'Added tags to the saved draft.'
+            : 'Added tags to local draft details.',
+        );
       setChosen([]);
       setChosenTags([]);
       if (saved.length) setTagSearchVersion((version) => version + 1);
@@ -367,11 +463,15 @@ export default function PhotoReview(props: Props) {
           'Some draft details could not be confirmed. Retry with the same selection.',
         );
       mergeDrafts(result.items);
+      for (const item of result.items)
+        logProcessing(item.photoId, 'Saved the draft title and tags.');
       setTagSearchVersion((version) => version + 1);
       setNotice(
         `${result.items.length} draft details saved. Image files and previews remain on this device. Reselect matching files to restore previews after leaving this page.`,
       );
     } catch (cause) {
+      for (const item of unsaved)
+        logProcessing(item.photoId, 'Draft save could not be confirmed.');
       setError(
         cause instanceof Error
           ? cause.message
@@ -404,6 +504,113 @@ export default function PhotoReview(props: Props) {
       setBusy(false);
     }
   }
+  async function editCapture(item: ReviewItem) {
+    if (busy || !item.saved) return;
+    resetMessages();
+    setBusy(true);
+    try {
+      const draft = await request<PhotoCaptureDraft>(
+        `/api/owner/photos/capture?photoId=${encodeURIComponent(item.photoId)}`,
+      );
+      let title = item.title;
+      if (draft.revision !== item.revision) {
+        const { items } = await request<{ items: ReviewDraft[] }>(
+          `/api/owner/photos?ids=${encodeURIComponent(item.photoId)}`,
+        );
+        mergeDrafts(items);
+        if (items[0]?.revision !== draft.revision)
+          throw new Error(
+            'The draft changed while loading. Open the editor again.',
+          );
+        title = items[0].title;
+      }
+      let gpsZone: string | null = null;
+      if (item.gps) {
+        try {
+          const { default: findTimeZone } =
+            await import('@photostructure/tz-lookup');
+          gpsZone = findTimeZone(item.gps.latitude, item.gps.longitude);
+        } catch {
+          // Manual timezone editing remains available if the lookup cannot load.
+        }
+      }
+      setEditingCapture({
+        title,
+        draft,
+        gpsZone,
+        file: item.file,
+        original:
+          item.file && item.hash && item.fileName
+            ? {
+                dateTime: item.capture?.dateTime ?? null,
+                subseconds: item.capture?.subseconds ?? null,
+                offset: item.capture?.offset ?? null,
+                sha256: item.hash,
+                originalFilename: item.fileName,
+              }
+            : undefined,
+      });
+      if (gpsZone) logProcessing(item.photoId, `GPS suggested ${gpsZone}.`);
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : 'Capture metadata could not be loaded.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveCapture(capture: CaptureEdit, checkSource: boolean) {
+    if (!editingCapture) throw new Error('Open the capture editor again.');
+    const { draft, original } = editingCapture;
+    logProcessing(draft.photoId, 'Validating and saving capture metadata.');
+    let saved: PhotoCaptureDraft;
+    try {
+      saved = await request<PhotoCaptureDraft>('/api/owner/photos/capture', {
+        photoId: draft.photoId,
+        expectedRevision: draft.revision,
+        capture,
+        ...(original && (checkSource || !draft.original) ? { original } : {}),
+      });
+    } catch (cause) {
+      if (cause instanceof ReviewRequestError && cause.status === 409)
+        throw new Error(
+          'The saved draft changed. Close and reopen the editor to review the latest values.',
+        );
+      throw cause;
+    }
+    setItems((current) =>
+      current.map((photo) =>
+        photo.photoId === saved.photoId
+          ? { ...photo, revision: saved.revision }
+          : photo,
+      ),
+    );
+    setNotice('Capture metadata saved to the draft.');
+    const confirmed = saved.capture;
+    const date = [
+      confirmed.localDate,
+      confirmed.localTime,
+      formatOffset(confirmed.offsetMinutes),
+      confirmed.timeZone,
+    ]
+      .filter(Boolean)
+      .join(' ');
+    logProcessing(
+      draft.photoId,
+      `Saved capture metadata to draft version ${saved.revision}${date ? ` (${date})` : ' (unknown date)'}.`,
+    );
+    if (!draft.original && saved.original)
+      logProcessing(
+        draft.photoId,
+        'Recorded the local JPEG’s original capture evidence.',
+      );
+    setEditingCapture({ ...editingCapture, draft: saved });
+    return saved.capture;
+  }
+
   async function loadMore(kind: 'photos' | 'collections') {
     const after = kind === 'photos' ? photoAfter : collectionAfter;
     if (!after) return;
@@ -447,15 +654,17 @@ export default function PhotoReview(props: Props) {
     );
     setSelected((current) => current.filter((id) => id !== active.photoId));
     setFocusId(null);
+    setProcessing((current) => {
+      const next = { ...current };
+      delete next[active.photoId];
+      return next;
+    });
   }
   return (
     <div className="photo-review" aria-busy={busy}>
       <div className="review-intro">
         <div>
-          <p>
-            Choose local JPEGs to review. Files stay on this device; saving
-            sends only draft titles and tags.
-          </p>
+          <p>Choose local JPEGs to review. Image files stay on this device.</p>
         </div>
         <button
           className="primary"
@@ -636,6 +845,24 @@ export default function PhotoReview(props: Props) {
                   </button>
                 </div>
               </div>
+              {active.previewUrl && (
+                <details className="capture-details">
+                  <summary>Capture metadata (EXIF)</summary>
+                  <OriginalCapture capture={active.capture ?? null} />
+                  <p>Read from the JPEG for this session.</p>
+                </details>
+              )}
+              {active.saved && (
+                <button
+                  type="button"
+                  className="text-button edit-capture"
+                  disabled={busy || !props.storageAvailable}
+                  onClick={() => void editCapture(active)}
+                >
+                  Edit capture metadata
+                </button>
+              )}
+              <PhotoProcessingLog events={processing?.[active.photoId] ?? []} />
               <div className="batch-toolbar">
                 <h2>{mode === 'local' ? 'Local batch' : 'Saved drafts'}</h2>
                 <div>
@@ -1010,8 +1237,8 @@ export default function PhotoReview(props: Props) {
                 : 'Save new drafts'}
             </button>
             <p className="small-note">
-              Saves titles and tags only. Image files stay on this device.
-              Drafts remain private until a later publication step.
+              Save new drafts records titles and tags. Capture metadata has its
+              own save action.
             </p>
             {active && !active.saved && (
               <button
@@ -1046,6 +1273,25 @@ export default function PhotoReview(props: Props) {
         )}
         <p>{active?.title || active?.fileName}</p>
       </dialog>
+      {editingCapture && (
+        <PhotoCaptureEditor
+          title={editingCapture.title ?? 'Untitled photograph'}
+          capture={editingCapture.draft.capture}
+          original={
+            editingCapture.draft.original ?? editingCapture.original ?? null
+          }
+          importsOriginal={Boolean(
+            editingCapture.original && !editingCapture.draft.original,
+          )}
+          gpsZone={editingCapture.gpsZone}
+          file={editingCapture.file}
+          onSave={saveCapture}
+          onProcessing={(message, dates) =>
+            logProcessing(editingCapture.draft.photoId, message, dates)
+          }
+          onClose={() => setEditingCapture(null)}
+        />
+      )}
     </div>
   );
 }
