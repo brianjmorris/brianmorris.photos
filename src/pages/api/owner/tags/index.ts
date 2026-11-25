@@ -15,5 +15,6 @@ export const GET: APIRoute = ({ locals, url }) =>
 export const POST: APIRoute = ({ locals, request }) =>
   tagApi(locals.owner, env.CATALOGUE, async (repository) => {
     const { input } = tagInput(await readCollectionBody(request, 'json'));
-    return Response.json(await repository.createTag(input), { status: 201 });
+    const { tag, created } = await repository.createOrFindTag(input);
+    return Response.json(tag, { status: created ? 201 : 200 });
   });

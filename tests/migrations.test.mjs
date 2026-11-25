@@ -5,6 +5,7 @@ import { CatalogueRepository } from '../src/catalogue/repository.ts';
 import { CollectionRepository } from '../src/catalogue/collections.ts';
 import { PlaceRepository } from '../src/catalogue/places.ts';
 import { SourceMetadataRepository } from '../src/catalogue/sources.ts';
+import { searchDraftTags } from '../src/catalogue/tag-search.ts';
 import {
   applyLocalMigrations,
   createLocalCatalogue,
@@ -36,7 +37,7 @@ async function integrity(db) {
 describe('current-state migration on populated D1', () => {
   it('preserves current and published content, source evidence, namespaces and dependent relationships', async () => {
     await withLegacy(async (db, source) => {
-      await applyLocalMigrations(db);
+      await applyLocalMigrations(db, upgrade);
       await applyLocalMigrations(db);
       const photos = new CatalogueRepository(db),
         collections = new CollectionRepository(db),
@@ -86,6 +87,28 @@ describe('current-state migration on populated D1', () => {
         (await photos.findDraftTag('DRAFT LEGACY-TAG-A ALIAS')).tagId,
         'legacy-tag-a',
       );
+      assert.equal(
+        (await searchDraftTags(db, 'draft legacy-tag-a alias', []))[0].tagId,
+        'legacy-tag-a',
+      );
+      assert(
+        !(
+          await db.prepare("PRAGMA table_info('tag_drafts')").all()
+        ).results.some((column) => column.name === 'slug'),
+      );
+      const pairs = await db
+        .prepare(
+          'SELECT tag_id, related_id, photo_count FROM tag_cooccurrences ORDER BY tag_id, related_id',
+        )
+        .all();
+      const expectedPairs = await db
+        .prepare(
+          `SELECT a.tag_id, b.tag_id AS related_id, count(*) AS photo_count
+        FROM photo_draft_tags a JOIN photo_draft_tags b ON a.photo_id=b.photo_id AND a.tag_id<>b.tag_id
+        GROUP BY a.tag_id, b.tag_id ORDER BY a.tag_id, b.tag_id`,
+        )
+        .all();
+      assert.deepEqual(pairs.results, expectedPairs.results);
       assert.deepEqual(
         (await db.prepare('SELECT * FROM migration_test_links').all()).results,
         [{ photo_id: 'legacy-photo', tag_id: 'legacy-tag-a' }],
@@ -100,7 +123,7 @@ describe('current-state migration on populated D1', () => {
             .prepare('SELECT COUNT(*) AS n FROM catalogue_test_migrations')
             .first()
         ).n,
-        6,
+        7,
       );
       await integrity(db);
     });
@@ -140,7 +163,6 @@ describe('current-state migration on populated D1', () => {
         );
         await photos.saveTagDraft('legacy-tag-a', version, {
           name: `Tag edit ${version}`,
-          slug: `tag-edit-${version}`,
           aliases: [`Alias edit ${version}`],
         });
         const collection = await collections.getDraft('legacy-collection');
@@ -419,7 +441,6 @@ describe('current-state migration on populated D1', () => {
         places = new PlaceRepository(db);
       const tag = await photos.createTag({
         name: 'Extended tag',
-        slug: 'extended-tag',
         aliases: ['Extended alias'],
       });
       await photos.saveTagDraft(tag.tagId, 1, {

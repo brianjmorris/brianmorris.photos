@@ -7,7 +7,6 @@ export async function seedCatalogue(db, size, { dense = false } = {}) {
     id: `${prefix}-tag-${i.toString().padStart(3, '0')}`,
     name: `Fixture ${size} collection ${i}`,
     normalized: `fixture ${size} collection ${i}`,
-    slug: `${prefix}-collection-${i}`,
   }));
   const statement = (sql, ...values) => db.prepare(sql).bind(...values);
   const tagJson = JSON.stringify(tags);
@@ -17,8 +16,8 @@ export async function seedCatalogue(db, size, { dense = false } = {}) {
       tagJson,
     ),
     statement(
-      `INSERT INTO tag_drafts (tag_id, revision, created_at, name, normalized_name, slug) SELECT json_extract(value, '$.id'), 1, 0,
-      json_extract(value, '$.name'), json_extract(value, '$.normalized'), json_extract(value, '$.slug') FROM json_each(?)`,
+      `INSERT INTO tag_drafts (tag_id, revision, created_at, name, normalized_name) SELECT json_extract(value, '$.id'), 1, 0,
+      json_extract(value, '$.name'), json_extract(value, '$.normalized') FROM json_each(?)`,
       tagJson,
     ),
     statement(

@@ -20,7 +20,6 @@ describe('local D1 catalogue', () => {
     const number = ++sequence;
     return repository.createTag({
       name: `Collection ${number}`,
-      slug: `collection-${number}`,
       aliases: [`Alias ${number}`],
     });
   };
@@ -65,7 +64,7 @@ describe('local D1 catalogue', () => {
     await applyLocalMigrations(db);
     assert.equal(
       await scalar('SELECT COUNT(*) FROM catalogue_test_migrations'),
-      6,
+      7,
     );
     assert.deepEqual(
       (await db.prepare('PRAGMA foreign_key_check').all()).results,
@@ -112,7 +111,6 @@ describe('local D1 catalogue', () => {
   it('normalizes names consistently without stemming or removing accents', async () => {
     const entry = await repository.createTag({
       name: '  Ｂｏａｔｓ\u00a0  Québec ',
-      slug: 'boats-quebec',
       aliases: [' BOAT Québec '],
     });
     assert.equal(entry.name, 'Boats Québec');
@@ -131,14 +129,12 @@ describe('local D1 catalogue', () => {
     await assert.rejects(
       repository.createTag({
         name: first.aliases[0].toUpperCase(),
-        slug: 'collision-one',
       }),
       isError('conflict'),
     );
     await assert.rejects(
       repository.createTag({
         name: 'Other collision name',
-        slug: 'collision-two',
         aliases: [first.name],
       }),
       isError('conflict'),
@@ -147,7 +143,6 @@ describe('local D1 catalogue', () => {
     await assert.rejects(
       repository.createTag({
         name: 'Self duplicate',
-        slug: 'self-duplicate',
         aliases: ['SELF DUPLICATE'],
       }),
       isError('invalid_input'),
@@ -155,35 +150,33 @@ describe('local D1 catalogue', () => {
     assert.equal(await scalar('SELECT COUNT(*) FROM tags'), count);
   });
 
-  it('keeps stable tag IDs and reserved slugs while replacing obsolete aliases', async () => {
+  it('keeps a stable ID, memberships and the former name when promoting an alias', async () => {
     const first = await tag();
+    const photo = await repository.createPhoto([first.tagId]);
     const second = await repository.saveTagDraft(
       first.tagId,
       1,
       {
-        name: 'Renamed collection',
-        slug: 'renamed-collection',
-        aliases: ['Renamed alias'],
+        name: first.aliases[0],
       },
       2000,
     );
     assert.equal(second.tagId, first.tagId);
     assert.equal(second.revision, 2);
     assert.equal(await repository.getTagRevision(first.tagId, 1), null);
-    assert.equal(await repository.findDraftTag(first.aliases[0]), null);
+    assert.deepEqual(second.aliases, [first.name]);
+    assert.equal(second.notes, first.notes);
     assert.equal(
-      (await repository.findDraftTag('RENAMED ALIAS')).tagId,
+      (await repository.findDraftTag(first.name)).tagId,
       first.tagId,
     );
-    await assert.rejects(
-      repository.createTag({ name: 'Slug thief', slug: first.slug }),
-      isError('conflict'),
-    );
-    await repository.saveTagDraft(first.tagId, 2, {
-      name: second.name,
-      slug: first.slug,
+    assert.deepEqual((await repository.getPhotoDraft(photo.photoId)).tagIds, [
+      first.tagId,
+    ]);
+    const third = await repository.saveTagDraft(first.tagId, 2, {
+      name: second.name.toUpperCase(),
     });
-    assert.equal((await repository.getTagDraft(first.tagId)).slug, first.slug);
+    assert.deepEqual(third.aliases, second.aliases);
   });
 
   it('rolls back a conflicting rename without losing the previous head or claims', async () => {
@@ -192,7 +185,6 @@ describe('local D1 catalogue', () => {
     await assert.rejects(
       repository.saveTagDraft(first.tagId, 1, {
         name: other.name,
-        slug: 'failed-rename',
         aliases: ['Temporary alias'],
       }),
       isError('conflict'),
@@ -203,13 +195,6 @@ describe('local D1 catalogue', () => {
     assert.equal(
       (await repository.findDraftTag(first.name)).tagId,
       first.tagId,
-    );
-    assert.equal(
-      await statement(
-        'SELECT * FROM tag_slugs WHERE slug = ?',
-        'failed-rename',
-      ).first(),
-      null,
     );
   });
 
@@ -278,12 +263,10 @@ describe('local D1 catalogue', () => {
     );
     await repository.saveTagDraft(entry.tagId, 1, {
       name: 'Latest tag',
-      slug: 'latest-tag',
     });
     await assert.rejects(
       repository.saveTagDraft(entry.tagId, 1, {
         name: 'Stale tag',
-        slug: 'stale-tag',
         aliases: ['Stale alias'],
       }),
       isError('conflict'),
@@ -291,7 +274,6 @@ describe('local D1 catalogue', () => {
     await assert.rejects(
       repository.saveTagDraft(entry.tagId, 12, {
         name: 'Future tag',
-        slug: 'future-tag',
         aliases: ['Future alias'],
       }),
       isError('conflict'),
@@ -461,7 +443,6 @@ describe('local D1 catalogue', () => {
     await repository.savePhotoDraft(photo.photoId, 1, [other.tagId]);
     await repository.saveTagDraft(entry.tagId, 1, {
       name: 'Private draft label',
-      slug: 'private-draft-label',
       aliases: ['Private draft alias'],
     });
     assert.deepEqual(await repository.getPublishedTag(entry.tagId), publicTag);
@@ -641,21 +622,20 @@ describe('local D1 catalogue', () => {
 
   it('validates input bounds and reports missing records', async () => {
     await assert.rejects(
-      repository.createTag({ name: '', slug: 'empty' }),
+      repository.createTag({ name: '' }),
       isError('invalid_input'),
     );
     await assert.rejects(
-      repository.createTag({ name: 'Control\0name', slug: 'control' }),
+      repository.createTag({ name: 'Control\0name' }),
       isError('invalid_input'),
     );
     await assert.rejects(
-      repository.createTag({ name: 'Bad slug', slug: 'Not a slug' }),
+      repository.createTag({ name: 'x'.repeat(121) }),
       isError('invalid_input'),
     );
     await assert.rejects(
       repository.createTag({
         name: 'Too many aliases',
-        slug: 'too-many-aliases',
         aliases: Array.from({ length: 33 }, (_, i) => `Alias ${i}`),
       }),
       isError('invalid_input'),
@@ -683,7 +663,6 @@ describe('local D1 catalogue', () => {
     await assert.rejects(
       repository.saveTagDraft('missing', 1, {
         name: 'Missing',
-        slug: 'missing',
       }),
       isError('not_found'),
     );

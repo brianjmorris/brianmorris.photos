@@ -1,3 +1,5 @@
+import { normalizeTagName } from '../catalogue/model.ts';
+
 export interface ReviewTag {
   tagId: string;
   name: string;
@@ -17,12 +19,25 @@ export interface ReviewCollection {
 export interface ReviewItem extends ReviewDraft {
   origin: 'local' | 'saved';
   saved: boolean;
+  proposedTags?: string[];
   fileName?: string;
   hash?: string;
   thumbnailUrl?: string;
   previewUrl?: string;
   width?: number;
   height?: number;
+}
+
+export function addProposedTags(
+  existing: readonly string[],
+  added: readonly string[],
+) {
+  const names = new Map<string, string>();
+  for (const name of [...existing, ...added]) {
+    const key = normalizeTagName(name);
+    if (!names.has(key)) names.set(key, name);
+  }
+  return [...names.values()];
 }
 
 export function tagCoverage(
@@ -99,6 +114,7 @@ export function draftDetails(photos: readonly ReviewItem[]) {
         photoId: photo.photoId,
         title: photo.title,
         tagIds: photo.tags.map((tag) => tag.tagId),
+        ...(photo.proposedTags?.length ? { tagNames: photo.proposedTags } : {}),
       })),
   };
 }

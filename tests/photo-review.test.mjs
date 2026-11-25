@@ -8,6 +8,7 @@ import {
   tagCoverage,
 } from '../src/photo-review/model.ts';
 import { CatalogueRepository } from '../src/catalogue/repository.ts';
+import { searchDraftTags } from '../src/catalogue/tag-search.ts';
 import {
   applyLocalMigrations,
   createLocalCatalogue,
@@ -85,7 +86,6 @@ describe('local batch draft persistence on D1', () => {
     repository = new CatalogueRepository(local.db);
     tag = await repository.createTag({
       name: 'Review tag',
-      slug: 'review-tag',
     });
   });
   after(async () => local?.close());
@@ -145,13 +145,113 @@ describe('local batch draft persistence on D1', () => {
     );
   });
   it('rolls back valid earlier items when a later item has a missing tag', async () => {
-    const batch = [input(), input({ tagIds: ['missing-tag'] })];
+    const batch = [
+      input({ tagNames: ['Rolled back tag'] }),
+      input({ tagIds: ['missing-tag'] }),
+    ];
     await assert.rejects(repository.createPhotoDraftBatch(batch));
     for (const photo of batch)
       assert.equal(await repository.getPhotoDraft(photo.photoId), null);
+    assert.equal(await repository.findDraftTag('Rolled back tag'), null);
     assert.deepEqual(
       (await local.db.prepare('PRAGMA foreign_key_check').all()).results,
       [],
+    );
+  });
+  it('resolves existing aliases and repeated proposals atomically without creating tags on a retry', async () => {
+    const existing = await repository.createTag({
+      name: 'street photography',
+      aliases: ['street photo'],
+    });
+    const batch = [
+      input({ tagNames: ['  STREET  Photo', 'Blue hour'] }),
+      input({ tagNames: ['blue  HOUR'] }),
+    ];
+    const written = await repository.createPhotoDraftBatch(batch);
+    const shared = await repository.findDraftTag('blue hour');
+    assert.deepEqual(
+      new Set(written[0].tagIds),
+      new Set([tag.tagId, existing.tagId, shared.tagId]),
+    );
+    assert(written[1].tagIds.includes(shared.tagId));
+    await repository.createPhotoDraftBatch([
+      { ...batch[0], tagNames: ['Unexpected retry proposal'] },
+    ]);
+    assert.equal(
+      await repository.findDraftTag('Unexpected retry proposal'),
+      null,
+    );
+    await assert.rejects(
+      repository.addTagsToPhotoDrafts(
+        [
+          { photoId: batch[0].photoId, expectedRevision: 1 },
+          { photoId: batch[1].photoId, expectedRevision: 2 },
+        ],
+        [],
+        ['Rejected saved proposal'],
+      ),
+      (error) => error.code === 'conflict',
+    );
+    assert.equal(
+      await repository.findDraftTag('Rejected saved proposal'),
+      null,
+    );
+  });
+
+  it('ranks names and aliases before direct and indirect suggestions, with fresh counts after edits', async () => {
+    const seed = await repository.createTag({
+      name: 'Québec bridge',
+      aliases: ['Québec crossing'],
+    });
+    const bridge = await repository.createTag({ name: 'river valley' });
+    const indirect = await repository.createTag({ name: 'waterfall' });
+    await repository.createPhoto([bridge.tagId, indirect.tagId]);
+    const photo = await repository.createPhoto([seed.tagId, bridge.tagId]);
+    const results = await searchDraftTags(local.db, 'Québec crossing', []);
+    assert.deepEqual(
+      results.map(({ name, match, via, exact }) => ({
+        name,
+        match,
+        via,
+        exact,
+      })),
+      [
+        { name: seed.name, match: 'alias', via: null, exact: true },
+        { name: bridge.name, match: 'direct', via: seed.name, exact: false },
+        {
+          name: indirect.name,
+          match: 'indirect',
+          via: bridge.name,
+          exact: false,
+        },
+      ],
+    );
+    assert.equal(
+      (await searchDraftTags(local.db, 'brid', []))[0].tagId,
+      seed.tagId,
+    );
+    assert.deepEqual(
+      await searchDraftTags(local.db, 'Quebec crossing', []),
+      [],
+    );
+    assert.deepEqual(await searchDraftTags(local.db, '") OR *', []), []);
+    assert.equal(
+      (await searchDraftTags(local.db, '', [seed.tagId]))[0].tagId,
+      bridge.tagId,
+    );
+    await repository.savePhotoMetadataDraft(photo.photoId, 1, {
+      title: 'Updated only',
+    });
+    assert.deepEqual(
+      await searchDraftTags(local.db, 'Québec crossing', []),
+      results,
+    );
+    await repository.savePhotoDraft(photo.photoId, 2, [seed.tagId]);
+    assert.deepEqual(
+      (await searchDraftTags(local.db, 'Québec crossing', [])).map(
+        (result) => result.tagId,
+      ),
+      [seed.tagId],
     );
   });
   it('rejects duplicate identifiers, excessive batches and malformed local identifiers before writing', async () => {

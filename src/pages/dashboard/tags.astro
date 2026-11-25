@@ -23,7 +23,6 @@ let error = '',
 let id = Astro.url.searchParams.get('edit') ?? '';
 let values = {
   name: '',
-  slug: '',
   aliases: '',
   notes: '',
   expectedRevision: '',
@@ -50,7 +49,6 @@ if (repository) {
       const { input, expectedRevision } = tagInput(
         {
           name: values.name,
-          slug: values.slug,
           aliases: values.aliases
             .split(/\r?\n/)
             .map((x) => x.trim())
@@ -60,11 +58,14 @@ if (repository) {
         },
         Boolean(id),
       );
-      const saved = id
-        ? await repository.saveTagDraft(id, expectedRevision!, input)
-        : await repository.createTag(input);
+      const { tag: saved, created } = id
+        ? {
+            tag: await repository.saveTagDraft(id, expectedRevision!, input),
+            created: true,
+          }
+        : await repository.createOrFindTag(input);
       return Astro.redirect(
-        `/dashboard/tags?edit=${encodeURIComponent(saved.tagId)}&saved=1`,
+        `/dashboard/tags?edit=${encodeURIComponent(saved.tagId)}&${created ? 'saved' : 'matched'}=1`,
         303,
       );
     } catch (cause) {
@@ -79,7 +80,6 @@ if (repository) {
       if (!tag) throw new CatalogueError('not_found', 'Tag not found.');
       values = {
         name: tag.name,
-        slug: tag.slug,
         aliases: tag.aliases.join('\n'),
         notes: tag.notes,
         expectedRevision: String(tag.revision),
@@ -101,7 +101,14 @@ if (repository) {
 ---
 
 <EditorLayout title="Tags">
-  <p>Tags describe photographs. Each tag can have its own Notes.</p>
+  <p>
+    Only the tag name is required. Add alternate names and notes when needed.
+  </p>
+  {!error && Astro.url.searchParams.has('matched') && (
+    <p class="notice" role="status">
+      Opened the existing tag that matches this name.
+    </p>
+  )}
   {error && (
     <div class="notice error" role="alert">
       <p>{error}</p>
@@ -177,20 +184,12 @@ if (repository) {
             value={values.name}
             required
             maxlength="120"
+            aria-describedby="name-help"
           />
-          <label for="slug">Tag address</label>
-          <input
-            id="slug"
-            name="slug"
-            value={values.slug}
-            required
-            maxlength="120"
-            pattern="[a-z0-9]+(-[a-z0-9]+)*"
-            aria-describedby="slug-help"
-          />
-          <p class="hint" id="slug-help">
-            Lowercase letters, numbers and hyphens. Earlier addresses remain
-            reserved.
+          <p class="hint" id="name-help">
+            Use spaces, lowercase for common terms, and conventional spelling
+            for proper names and abbreviations. Keep meaningful accents and
+            punctuation. Use the singular where natural.
           </p>
           <label for="aliases">Alternate names</label>
           <textarea
@@ -201,7 +200,8 @@ if (repository) {
             aria-describedby="aliases-help"
           >{values.aliases}</textarea>
           <p class="hint" id="aliases-help">
-            One per line, up to 32. Each name or alias identifies one tag.
+            One per line, up to 32. Enter an alternate name above to make it the
+            preferred name. The previous name stays searchable.
           </p>
           <label for="notes">Notes</label>
           <textarea

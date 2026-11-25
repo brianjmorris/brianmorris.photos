@@ -37,7 +37,6 @@ describe('distinct collections on disposable D1', () => {
       ['Japan', 'Architecture', 'Night', 'Extra'].map((name) =>
         tags.createTag({
           name: `${prefix} ${name}`,
-          slug: `tag-${prefix}-${name.toLowerCase()}`,
           aliases: [`${prefix} Alias ${name}`],
           notes: `Tag Notes ${name}`,
         }),
@@ -480,7 +479,6 @@ describe('collection and tag transport', () => {
       () =>
         tagInput({
           name: 'Japan',
-          slug: 'japan',
           aliases: [],
           notes: '',
           featuredOrder: 1,

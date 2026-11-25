@@ -25,6 +25,12 @@ import {
 const MAX_PHOTO_TAGS = 64;
 const MAX_TAG_ALIASES = 32;
 
+function proposedTagNames(names: readonly string[] = []) {
+  if (!Array.isArray(names) || names.length > MAX_PHOTO_TAGS)
+    invalid('Choose at most 64 proposed tags.');
+  return names.map(cleanTagName);
+}
+
 export class CatalogueRepository {
   private readonly db: CatalogueDatabase;
 
@@ -71,6 +77,7 @@ export class CatalogueRepository {
     tagIds: readonly string[],
     now: number,
     metadata?: PhotoMetadataInput,
+    tagNames: readonly string[] = [],
   ) {
     validId(id);
     validRevision(revision);
@@ -79,17 +86,36 @@ export class CatalogueRepository {
       invalid(`A photo can have at most ${MAX_PHOTO_TAGS} tags.`);
     }
     tagIds.forEach(validId);
-    const uniqueTags = [...new Set(tagIds)];
+    const desiredTags = `SELECT value AS tag_id FROM json_each(?3)
+      UNION SELECT tag_id FROM tag_name_claims WHERE normalized_name IN (SELECT value FROM json_each(?4))`;
+    const tagValues = [
+      id,
+      revision,
+      JSON.stringify(tagIds),
+      JSON.stringify(tagNames.map(normalizeTagName)),
+    ] as const;
     return [
-      this.statement('DELETE FROM photo_draft_tags WHERE photo_id = ?', id),
+      ...(revision === 1
+        ? []
+        : [
+            this.statement(
+              `DELETE FROM photo_draft_tags WHERE photo_id=?1
+            AND photo_revision=?2-1 AND tag_id NOT IN (${desiredTags})`,
+              ...tagValues,
+            ),
+            this.statement(
+              'UPDATE photo_draft_tags SET photo_revision=?2 WHERE photo_id=?1 AND photo_revision=?2-1',
+              id,
+              revision,
+            ),
+          ]),
       metadataStatement(this.db, id, revision, metadata),
-      ...uniqueTags.map((tagId) =>
-        this.statement(
-          'INSERT INTO photo_draft_tags (photo_id, photo_revision, tag_id) VALUES (?, ?, ?)',
-          id,
-          revision,
-          tagId,
-        ),
+      this.statement(
+        `INSERT INTO photo_draft_tags (photo_id, photo_revision, tag_id)
+          SELECT ?1, ?2, wanted.tag_id FROM (${desiredTags}) wanted
+          WHERE NOT EXISTS (SELECT 1 FROM photo_draft_tags existing
+            WHERE existing.photo_id=?1 AND existing.photo_revision=?2 AND existing.tag_id=wanted.tag_id)`,
+        ...tagValues,
       ),
       this.statement(
         revision === 1
@@ -131,6 +157,7 @@ export class CatalogueRepository {
       invalid('Choose between 1 and 30 photographs.');
     const seen = new Set<string>();
     const statements = [];
+    const newNames: string[] = [];
     const now = Date.now();
     for (const item of items) {
       if (
@@ -145,10 +172,19 @@ export class CatalogueRepository {
       seen.add(item.photoId);
       text(item.title, 300);
       // Validate every item before any writes, including idempotent retries.
-      const content = this.photoStatements(item.photoId, 1, item.tagIds, now, {
-        title: item.title,
-      });
-      if (!(await this.getPhotoDraft(item.photoId)))
+      const names = proposedTagNames(item.tagNames);
+      const content = this.photoStatements(
+        item.photoId,
+        1,
+        item.tagIds,
+        now,
+        {
+          title: item.title,
+        },
+        names,
+      );
+      if (!(await this.getPhotoDraft(item.photoId))) {
+        newNames.push(...names);
         statements.push(
           this.statement(
             'INSERT INTO photos (id, created_at) VALUES (?, ?)',
@@ -157,15 +193,20 @@ export class CatalogueRepository {
           ),
           ...content,
         );
+      }
     }
-    const results = await writeCatalogueBatch(this.db, [
+    const writes = [
+      ...this.resolveOrCreateTagStatements(newNames, now),
       ...statements,
+    ];
+    const results = await writeCatalogueBatch(this.db, [
+      ...writes,
       ...items.map((item) => this.photoRead(item.photoId)),
     ]);
     return items.map((item, index) =>
       this.photoResult(
         item.photoId,
-        results[statements.length + index].results[0],
+        results[writes.length + index].results[0],
       )!,
     );
   }
@@ -213,6 +254,7 @@ export class CatalogueRepository {
   async addTagsToPhotoDrafts(
     photos: readonly PhotoDraftSelection[],
     tagIds: readonly string[],
+    tagNames?: readonly string[],
   ) {
     if (!Array.isArray(photos) || !photos.length || photos.length > 30)
       invalid('Choose between 1 and 30 photographs.');
@@ -224,6 +266,7 @@ export class CatalogueRepository {
       invalid('Choose each photograph only once.');
     const statements = [];
     const now = Date.now();
+    const names = proposedTagNames(tagNames);
     for (const photo of photos) {
       validId(photo.photoId);
       validRevision(photo.expectedRevision);
@@ -233,22 +276,30 @@ export class CatalogueRepository {
       if (current.revision !== photo.expectedRevision)
         throw new CatalogueError(
           'conflict',
-          'A selected photograph changed. Reload before assigning collections.',
+          'A selected photograph changed. Reload before assigning tags.',
         );
       const tags = [...new Set([...current.tagIds, ...tagIds])].sort();
       statements.push(
-        ...this.photoStatements(photo.photoId, current.revision + 1, tags, now),
+        ...this.photoStatements(
+          photo.photoId,
+          current.revision + 1,
+          tags,
+          now,
+          undefined,
+          names,
+        ),
       );
     }
-    const result = await writeCatalogueBatch(this.db, [
+    const writes = [
+      ...this.resolveOrCreateTagStatements(names, now),
       ...statements,
+    ];
+    const result = await writeCatalogueBatch(this.db, [
+      ...writes,
       ...photos.map((photo) => this.photoRead(photo.photoId)),
     ]);
     return photos.map((photo, index) =>
-      this.photoResult(
-        photo.photoId,
-        result[statements.length + index].results[0],
-      ),
+      this.photoResult(photo.photoId, result[writes.length + index].results[0]),
     );
   }
 
@@ -338,13 +389,6 @@ export class CatalogueRepository {
     const notes = input.notes ?? '';
     if (typeof notes !== 'string') invalid('Notes must be text.');
     text(notes, 20_000);
-    if (
-      typeof input.slug !== 'string' ||
-      input.slug.length > 120 ||
-      !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(input.slug)
-    ) {
-      invalid('A lowercase ASCII slug is required.');
-    }
     const aliases = input.aliases ?? [];
     if (!Array.isArray(aliases) || aliases.length > MAX_TAG_ALIASES)
       invalid(`A tag can have at most ${MAX_TAG_ALIASES} aliases.`);
@@ -368,14 +412,13 @@ export class CatalogueRepository {
       ...aliasStatements,
       this.statement(
         revision === 1
-          ? 'INSERT INTO tag_drafts (tag_id, revision, created_at, name, normalized_name, slug, notes) VALUES (?, ?, ?, ?, ?, ?, ?)'
-          : 'UPDATE tag_drafts SET revision=?2, created_at=?3, name=?4, normalized_name=?5, slug=?6, notes=?7 WHERE tag_id=?1',
+          ? 'INSERT INTO tag_drafts (tag_id, revision, created_at, name, normalized_name, notes) VALUES (?, ?, ?, ?, ?, ?)'
+          : 'UPDATE tag_drafts SET revision=?2, created_at=?3, name=?4, normalized_name=?5, notes=?6 WHERE tag_id=?1',
         id,
         revision,
         now,
         name,
         normalizeTagName(name),
-        input.slug,
         notes,
       ),
       this.statement(
@@ -398,7 +441,7 @@ export class CatalogueRepository {
         ? 'tag_draft_aliases'
         : 'tag_aliases';
     return this.statement(
-      `SELECT r.revision,r.name,r.slug,r.created_at,r.notes,
+      `SELECT r.revision,r.name,r.created_at,r.notes,
       (SELECT json_group_array(alias) FROM (SELECT alias FROM ${aliases} a WHERE a.tag_id=r.tag_id AND a.tag_revision=r.revision ORDER BY normalized_alias)) AS aliases_json
       FROM ${table} r ${published ? 'JOIN published_tags p ON p.tag_id=r.tag_id AND p.tag_revision=r.revision' : ''}
       WHERE r.tag_id=? ${revision === undefined ? '' : 'AND r.revision=?'}`,
@@ -417,7 +460,6 @@ export class CatalogueRepository {
           revision: row.revision as number,
           createdAt: row.created_at as number,
           name: row.name as string,
-          slug: row.slug as string,
           notes: row.notes as string,
           aliases: JSON.parse(row.aliases_json as string),
         }
@@ -438,6 +480,59 @@ export class CatalogueRepository {
     return this.tagResult(id, result.at(-1)!.results[0])!;
   }
 
+  async createOrFindTag(input: TagInput) {
+    const existing = await this.findDraftTag(input.name);
+    if (existing) return { tag: existing, created: false };
+    try {
+      return { tag: await this.createTag(input), created: true };
+    } catch (error) {
+      if (error instanceof CatalogueError && error.code === 'conflict') {
+        const match = await this.findDraftTag(input.name);
+        if (match) return { tag: match, created: false };
+      }
+      throw error;
+    }
+  }
+
+  // Resolve all names and aliases under the same transaction as their assignments.
+  private resolveOrCreateTagStatements(names: readonly string[], now: number) {
+    if (!names.length) return [];
+    const unique = new Map<string, string>();
+    for (const name of names) {
+      const normalized = normalizeTagName(name);
+      if (!unique.has(normalized)) unique.set(normalized, name);
+    }
+    if (unique.size > MAX_PHOTO_TAGS)
+      invalid('Choose at most 64 different proposed tags per save.');
+    const candidates = JSON.stringify(
+      Array.from(unique, ([normalized, name]) => ({
+        id: crypto.randomUUID(),
+        name,
+        normalized,
+      })),
+    );
+    return [
+      this.statement(
+        `INSERT INTO tags (id, created_at)
+          SELECT json_extract(value, '$.id'), ?2 FROM json_each(?1)
+          WHERE NOT EXISTS (SELECT 1 FROM tag_name_claims WHERE normalized_name=json_extract(value, '$.normalized'))`,
+        candidates,
+        now,
+      ),
+      this.statement(
+        `INSERT INTO tag_drafts (tag_id, revision, created_at, name, normalized_name)
+          SELECT t.id, 1, t.created_at, json_extract(j.value, '$.name'), json_extract(j.value, '$.normalized')
+          FROM json_each(?) j JOIN tags t ON t.id=json_extract(j.value, '$.id')`,
+        candidates,
+      ),
+      this.statement(
+        `UPDATE tags SET draft_revision=1 WHERE id IN (SELECT json_extract(value, '$.id') FROM json_each(?))
+          AND EXISTS (SELECT 1 FROM tag_drafts WHERE tag_id=tags.id)`,
+        candidates,
+      ),
+    ];
+  }
+
   async saveTagDraft(
     id: string,
     expectedRevision: number,
@@ -454,8 +549,30 @@ export class CatalogueRepository {
         'This tag changed in another window. Reload it before saving.',
       );
     const revision = expectedRevision + 1;
+    const name = normalizeTagName(input.name);
+    const previousName = normalizeTagName(current.name);
+    const aliases = input.aliases ?? current.aliases;
+    const renamedAliases =
+      name === previousName
+        ? aliases
+        : [
+            ...aliases.filter(
+              (alias) =>
+                ![name, previousName].includes(normalizeTagName(alias)),
+            ),
+            current.name,
+          ];
     const result = await writeCatalogueBatch(this.db, [
-      ...this.tagStatements(id, revision, input, now),
+      ...this.tagStatements(
+        id,
+        revision,
+        {
+          ...input,
+          aliases: renamedAliases,
+          notes: input.notes ?? current.notes,
+        },
+        now,
+      ),
       this.tagRead(id),
     ]);
     return this.tagResult(id, result.at(-1)!.results[0])!;
@@ -513,7 +630,7 @@ export class CatalogueRepository {
       : null;
     if (afterId && !after) invalid('The tag page is no longer available.');
     const rows = await this.statement(
-      `SELECT t.id, r.revision, r.name, r.slug, p.tag_revision AS published_revision
+      `SELECT t.id, r.revision, r.name, p.tag_revision AS published_revision
        FROM tag_states r JOIN tags t ON t.id = r.tag_id AND t.draft_revision = r.revision
        LEFT JOIN published_tags p ON p.tag_id = t.id
        ${after ? 'WHERE (r.normalized_name, t.id) > (?, ?)' : ''}
@@ -524,14 +641,12 @@ export class CatalogueRepository {
       id: string;
       revision: number;
       name: string;
-      slug: string;
       published_revision: number | null;
     }>();
     const items = rows.results.slice(0, limit).map((row) => ({
       tagId: row.id,
       revision: row.revision,
       name: row.name,
-      slug: row.slug,
       publishedRevision: row.published_revision,
     }));
     return {
@@ -627,7 +742,6 @@ export class CatalogueRepository {
 
 export interface TagInput {
   name: string;
-  slug: string;
   aliases?: readonly string[];
   notes?: string;
 }
@@ -641,4 +755,5 @@ export interface NewPhotoDraft {
   photoId: string;
   title: string | null;
   tagIds: readonly string[];
+  tagNames?: readonly string[];
 }

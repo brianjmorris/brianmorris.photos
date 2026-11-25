@@ -35,6 +35,7 @@ export async function verifyCollectionEditor(
     '/dashboard/collections',
     '/dashboard/photos',
     '/api/owner/tags',
+    '/api/owner/tags/search?q=Nippon',
     '/api/owner/collections',
     '/api/owner/photos',
   ]) {
@@ -44,7 +45,6 @@ export async function verifyCollectionEditor(
   }
   const tagInput = {
     name: 'Japan',
-    slug: 'japan',
     aliases: ['Nippon'],
     notes: 'Tag Notes',
   };
@@ -54,16 +54,30 @@ export async function verifyCollectionEditor(
   assert.equal(forbidden.status, 403);
   assertPrivate(forbidden);
   const tags = [];
-  for (const input of [
-    tagInput,
-    { name: 'Architecture', slug: 'architecture', aliases: [], notes: '' },
-    { name: 'Night', slug: 'night', aliases: [], notes: '' },
-  ]) {
+  for (const input of [tagInput, { name: 'Architecture' }, { name: 'Night' }]) {
     const response = await json('/api/owner/tags', 'POST', input);
     assert.equal(response.status, 201);
     assertPrivate(response);
     tags.push(await response.json());
   }
+  const existingTag = await json('/api/owner/tags', 'POST', {
+    name: '  NIPPON ',
+  });
+  assert.equal(existingTag.status, 200);
+  assert.equal((await existingTag.json()).tagId, tags[0].tagId);
+  const tagPage = await send('/dashboard/tags');
+  assert(!(await tagPage.text()).includes('Tag address'));
+  const tagSearch = await send('/api/owner/tags/search?q=nippon');
+  assert.equal(tagSearch.status, 200);
+  assertPrivate(tagSearch);
+  assert.deepEqual((await tagSearch.json()).items[0], {
+    tagId: tags[0].tagId,
+    name: 'Japan',
+    match: 'alias',
+    alias: 'Nippon',
+    via: null,
+    exact: true,
+  });
   assert.equal(
     (await json('/api/owner/tags', 'POST', { ...tagInput, featuredOrder: 1 }))
       .status,
@@ -134,7 +148,6 @@ export async function verifyCollectionEditor(
   const renamed = await json(`/api/owner/tags/${tags[0].tagId}`, 'PUT', {
     ...tagInput,
     name: 'Japan renamed',
-    slug: 'japan-renamed',
     aliases: [],
     notes: 'Updated tag Notes',
     expectedRevision: 2,
@@ -307,6 +320,21 @@ export async function verifyCollectionEditor(
   assert.deepEqual(
     assignedSummary.tags.map((tag) => tag.name),
     ['Architecture', 'Japan renamed', 'Night'],
+  );
+  const individualAssignment = await json(
+    '/api/owner/photos/assign-collections',
+    'POST',
+    {
+      photos: [{ photoId: untagged.photoId, expectedRevision: 3 }],
+      collectionIds: [],
+      tagNames: ['Japan', 'city lights'],
+    },
+  );
+  assert.equal(individualAssignment.status, 200);
+  const assignedTags = (await individualAssignment.json()).items[0].tags;
+  assert.deepEqual(
+    assignedTags.map((tag) => tag.name),
+    ['Architecture', 'city lights', 'Japan renamed', 'Night'],
   );
   const denial = await json(
     '/api/owner/photos/assign-collections',

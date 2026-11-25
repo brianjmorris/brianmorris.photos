@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  addProposedTags,
   addRequiredTags,
   collectionLabel,
   draftDetails,
@@ -9,8 +10,10 @@ import {
   type ReviewCollection,
   type ReviewDraft,
   type ReviewItem,
+  type ReviewTag,
 } from '../../photo-review/model.ts';
 import { previewFile } from '../../photo-review/preview.ts';
+import TagPicker, { type ChosenTag } from './TagPicker.tsx';
 import './PhotoReview.css';
 
 interface Props {
@@ -70,6 +73,8 @@ export default function PhotoReview(props: Props) {
     [focusId, setFocusId] = useState<string | null>(null);
   const [chosen, setChosen] = useState<string[]>([]),
     [search, setSearch] = useState('');
+  const [chosenTags, setChosenTags] = useState<ChosenTag[]>([]);
+  const [tagSearchVersion, setTagSearchVersion] = useState(0);
   const [photoAfter, setPhotoAfter] = useState(props.photoAfter),
     [collectionAfter, setCollectionAfter] = useState(props.collectionAfter);
   const [busy, setBusy] = useState(false),
@@ -92,8 +97,25 @@ export default function PhotoReview(props: Props) {
   const picked = collections.filter((collection) =>
     chosen.includes(collection.collectionId),
   );
-  const required = requiredTags(picked),
+  const individual = chosenTags.filter(
+    (tag): tag is ReviewTag => tag.tagId !== undefined,
+  );
+  const newNames = chosenTags
+    .filter((tag) => !tag.tagId)
+    .map((tag) => tag.name);
+  const required = addRequiredTags(requiredTags(picked), individual),
     coverage = tagCoverage(selection, required);
+  const tagContext = [
+    ...new Set([
+      ...individual.map((tag) => tag.tagId),
+      ...coverage
+        .filter((tag) => tag.count > 0)
+        .sort((a, b) => b.count - a.count)
+        .map((tag) => tag.tagId),
+    ]),
+  ]
+    .slice(0, 8)
+    .join(',');
   const unsaved = selection.filter((item) => !item.saved);
   const activePosition = active ? visible.indexOf(active) : -1;
   const searchText = search.toLocaleLowerCase();
@@ -167,6 +189,7 @@ export default function PhotoReview(props: Props) {
           ...draft,
           origin: byId.get(draft.photoId)?.origin ?? 'saved',
           saved: true,
+          proposedTags: undefined,
         });
       return [...byId.values()];
     });
@@ -266,25 +289,25 @@ export default function PhotoReview(props: Props) {
       if (attach.current) attach.current.value = '';
     }
   }
-  async function applyCollections() {
-    if (!selection.length || !picked.length || busy) return;
+  async function applyTags() {
+    if (!selection.length || (!picked.length && !chosenTags.length) || busy)
+      return;
     resetMessages();
     if (
       selection.some((item) => addRequiredTags(item.tags, required).length > 64)
     ) {
       setError(
-        'A photograph can have at most 64 tags. Choose fewer collections before applying.',
+        'A photograph can have at most 64 tags. Choose fewer tags or collections before applying.',
       );
       return;
     }
     setBusy(true);
     try {
       const saved = selection.filter((item) => item.saved);
-      let updated: { photoId: string; revision: number; tagIds: string[] }[] =
-        [];
+      let updated: ReviewDraft[] = [];
       if (saved.length)
         updated = (
-          await request<{ photos: typeof updated }>(
+          await request<{ items: ReviewDraft[] }>(
             '/api/owner/photos/assign-collections',
             {
               photos: saved.map((item) => ({
@@ -294,28 +317,33 @@ export default function PhotoReview(props: Props) {
               collectionIds: picked.map(
                 (collection) => collection.collectionId,
               ),
+              ...(individual.length
+                ? { tagIds: individual.map((tag) => tag.tagId) }
+                : {}),
+              ...(newNames.length ? { tagNames: newNames } : {}),
             },
           )
-        ).photos;
+        ).items;
       const updates = new Map(updated.map((item) => [item.photoId, item]));
       setItems((current) =>
         current.map((item) => {
           if (!selected.includes(item.photoId)) return item;
           const result = updates.get(item.photoId);
-          const tags = addRequiredTags(item.tags, required);
+          if (result) return { ...item, ...result };
+          if (item.saved) return item;
           return {
             ...item,
-            tags: result
-              ? tags.filter((tag) => result.tagIds.includes(tag.tagId))
-              : tags,
-            revision: result?.revision ?? item.revision,
+            tags: addRequiredTags(item.tags, required),
+            proposedTags: addProposedTags(item.proposedTags ?? [], newNames),
           };
         }),
       );
       setNotice(
-        `Collection tags added to ${selection.length} ${selection.length === 1 ? 'photograph' : 'photographs'}. Other tags were kept.${unsaved.length ? ' Save the new draft details when ready.' : ''}`,
+        `Tags added to ${selection.length} ${selection.length === 1 ? 'photograph' : 'photographs'}.${unsaved.length ? ' Save the new draft details when ready.' : ''}`,
       );
       setChosen([]);
+      setChosenTags([]);
+      if (saved.length) setTagSearchVersion((version) => version + 1);
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : 'Tags could not be added.',
@@ -339,6 +367,7 @@ export default function PhotoReview(props: Props) {
           'Some draft details could not be confirmed. Retry with the same selection.',
         );
       mergeDrafts(result.items);
+      setTagSearchVersion((version) => version + 1);
       setNotice(
         `${result.items.length} draft details saved. Image files and previews remain on this device. Reselect matching files to restore previews after leaving this page.`,
       );
@@ -365,7 +394,7 @@ export default function PhotoReview(props: Props) {
       );
       mergeDrafts(result.items);
       setNotice(
-        'Saved details refreshed. Review the tags, then apply your collection selection again.',
+        'Saved details refreshed. Review the tags, then apply your selection again.',
       );
     } catch (cause) {
       setError(
@@ -689,7 +718,7 @@ export default function PhotoReview(props: Props) {
               </h2>
               <p>
                 {mode === 'local'
-                  ? 'Choose up to 30 JPEGs. Review them together, add collection tags, and save the draft details when ready.'
+                  ? 'Choose up to 30 JPEGs. Review them together, add tags, and save the draft details when ready.'
                   : 'Drafts you save will appear here. Choose local files to begin a batch.'}
               </p>
               <button
@@ -724,7 +753,7 @@ export default function PhotoReview(props: Props) {
         <aside
           className="review-inspector"
           id="review-selection-tools"
-          aria-label="Selection and collection tools"
+          aria-label="Selection and tag tools"
         >
           <section className="inspector-section">
             <a className="mobile-review-jump" href="#review-photographs">
@@ -739,8 +768,8 @@ export default function PhotoReview(props: Props) {
               <span className="small-note">Up to 30</span>
             </div>
             <p className="small-note">
-              Use the checkboxes to choose which photographs receive collection
-              tags. Opening a preview keeps your selection.
+              Use the checkboxes to choose which photographs receive tags.
+              Opening a preview keeps your selection.
             </p>
             {active && !active.saved && (
               <label className="draft-title">
@@ -788,7 +817,21 @@ export default function PhotoReview(props: Props) {
             )}
           </section>
           <section className="inspector-section">
-            <h2>Add collection tags</h2>
+            <h2>Add tags</h2>
+            <TagPicker
+              context={tagContext}
+              chosen={chosenTags}
+              disabled={busy}
+              available={props.storageAvailable}
+              version={tagSearchVersion}
+              onChange={setChosenTags}
+            />
+            {!selection.length && !!chosenTags.length && (
+              <p className="small-note" role="status">
+                Select photographs to apply these tags.
+              </p>
+            )}
+            <h3>Add to Collection</h3>
             <p className="small-note">
               Choose collections to add their required tags. Existing tags are
               kept.
@@ -854,7 +897,7 @@ export default function PhotoReview(props: Props) {
                 Load more collections
               </button>
             )}
-            {!!required.length && !!selection.length && (
+            {!!(required.length || newNames.length) && !!selection.length && (
               <div className="tag-result">
                 <h3>After adding</h3>
                 <div className="tag-list">
@@ -874,6 +917,12 @@ export default function PhotoReview(props: Props) {
                       </small>
                     </span>
                   ))}
+                  {newNames.map((name) => (
+                    <span className="tag-chip proposed" key={name}>
+                      {name}
+                      <small>Suggested · New</small>
+                    </span>
+                  ))}
                 </div>
               </div>
             )}
@@ -883,11 +932,11 @@ export default function PhotoReview(props: Props) {
               disabled={
                 busy ||
                 !selection.length ||
-                !picked.length ||
+                (!picked.length && !chosenTags.length) ||
                 (!props.storageAvailable &&
                   selection.some((item) => item.saved))
               }
-              onClick={() => void applyCollections()}
+              onClick={() => void applyTags()}
             >
               Add tags to {selection.length || 'selected'}{' '}
               {selection.length === 1 ? 'photograph' : 'photographs'}
@@ -902,7 +951,33 @@ export default function PhotoReview(props: Props) {
                     {tag.name}
                   </span>
                 ))}
-                {!active.tags.length && (
+                {active.proposedTags?.map((name) => (
+                  <button
+                    type="button"
+                    key={name}
+                    className="tag-chip proposed"
+                    disabled={busy}
+                    aria-label={`Remove proposed tag ${name} from this photograph`}
+                    onClick={() =>
+                      setItems((current) =>
+                        current.map((item) =>
+                          item.photoId === active.photoId
+                            ? {
+                                ...item,
+                                proposedTags: item.proposedTags?.filter(
+                                  (value) => value !== name,
+                                ),
+                              }
+                            : item,
+                        ),
+                      )
+                    }
+                  >
+                    {name}
+                    <small>New · Pending save</small> ×
+                  </button>
+                ))}
+                {!active.tags.length && !active.proposedTags?.length && (
                   <span className="small-note">No tags yet</span>
                 )}
               </div>

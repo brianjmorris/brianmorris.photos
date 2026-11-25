@@ -42,12 +42,17 @@ export const POST: APIRoute = ({ locals, request }) =>
           typeof photo !== 'object' ||
           Array.isArray(photo) ||
           Object.keys(photo).some(
-            (key) => !['photoId', 'title', 'tagIds'].includes(key),
+            (key) => !['photoId', 'title', 'tagIds', 'tagNames'].includes(key),
           ) ||
           typeof photo.photoId !== 'string' ||
           !(photo.title === null || typeof photo.title === 'string') ||
           !Array.isArray(photo.tagIds) ||
-          photo.tagIds.some((id: unknown) => typeof id !== 'string'),
+          photo.tagIds.some((id: unknown) => typeof id !== 'string') ||
+          (photo.tagNames !== undefined &&
+            (!Array.isArray(photo.tagNames) ||
+              photo.tagNames.some(
+                (name: unknown) => typeof name !== 'string',
+              ))),
       )
     )
       invalid('Supply only draft identifiers, titles and tags.');

@@ -13,7 +13,6 @@ export function tagInput(
   const data = value as Record<string, unknown>;
   const allowed = [
     'name',
-    'slug',
     'aliases',
     'notes',
     ...(editing ? ['expectedRevision'] : []),
@@ -21,19 +20,18 @@ export function tagInput(
   if (
     Object.keys(data).some((key) => !allowed.includes(key)) ||
     typeof data.name !== 'string' ||
-    typeof data.slug !== 'string' ||
-    !Array.isArray(data.aliases) ||
-    data.aliases.some((alias) => typeof alias !== 'string') ||
-    typeof data.notes !== 'string'
+    (data.aliases !== undefined &&
+      (!Array.isArray(data.aliases) ||
+        data.aliases.some((alias) => typeof alias !== 'string'))) ||
+    (data.notes !== undefined && typeof data.notes !== 'string')
   )
-    invalid('Supply the tag name, address, aliases and Notes.');
+    invalid('Supply a tag name and optional aliases and notes.');
   if (editing) validRevision(data.expectedRevision as number);
   return {
     input: {
       name: data.name,
-      slug: data.slug,
-      aliases: data.aliases as string[],
-      notes: data.notes,
+      aliases: data.aliases as string[] | undefined,
+      notes: data.notes as string | undefined,
     },
     ...(editing ? { expectedRevision: data.expectedRevision as number } : {}),
   };

@@ -5,7 +5,10 @@ import {
   collectionApi,
   readCollectionBody,
 } from '../../../../authoring/collections.ts';
-import type { PhotoDraftSelection } from '../../../../catalogue/repository.ts';
+import {
+  CatalogueRepository,
+  type PhotoDraftSelection,
+} from '../../../../catalogue/repository.ts';
 
 export const POST: APIRoute = ({ locals, request }) =>
   collectionApi(locals.owner, env.CATALOGUE, async (repository) => {
@@ -15,12 +18,22 @@ export const POST: APIRoute = ({ locals, request }) =>
     const data = value as Record<string, unknown>;
     if (
       Object.keys(data).some(
-        (key) => !['photos', 'collectionIds'].includes(key),
+        (key) =>
+          !['photos', 'collectionIds', 'tagIds', 'tagNames'].includes(key),
       ) ||
       !Array.isArray(data.photos) ||
       !Array.isArray(data.collectionIds)
     )
       invalid('Select photographs and collections.');
+    const { tagIds = [], tagNames = [] } = data;
+    if (
+      !Array.isArray(tagIds) ||
+      tagIds.length > 64 ||
+      !Array.isArray(tagNames) ||
+      tagNames.length > 64 ||
+      tagNames.some((name: unknown) => typeof name !== 'string')
+    )
+      invalid('Select valid tags.');
     if (
       data.photos.some(
         (photo) =>
@@ -33,10 +46,21 @@ export const POST: APIRoute = ({ locals, request }) =>
       )
     )
       invalid('Invalid photograph selection.');
+    const photos = data.photos as PhotoDraftSelection[];
+    const updated = await repository.assignPhotos(
+      photos,
+      data.collectionIds as string[],
+      tagIds,
+      tagNames,
+    );
     return Response.json({
-      photos: await repository.assignPhotos(
-        data.photos as PhotoDraftSelection[],
-        data.collectionIds as string[],
-      ),
+      photos: updated,
+      items: (
+        await new CatalogueRepository(env.CATALOGUE!).listPhotoDrafts(
+          undefined,
+          30,
+          photos.map((photo) => photo.photoId),
+        )
+      ).items,
     });
   });

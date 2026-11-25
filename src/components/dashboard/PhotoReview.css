@@ -367,7 +367,8 @@
   margin-top: 1rem;
 }
 .photo-review .draft-title input,
-.photo-review .collection-search input {
+.photo-review .collection-search input,
+.photo-review input.tag-query {
   margin-top: 0.4rem;
   font-size: 0.85rem;
   padding: 0.6rem;
@@ -396,6 +397,44 @@
 .tag-chip.adding {
   background: #e5f0df;
   border-color: #9bb98e;
+}
+.tag-chip.proposed {
+  background: #f4f0e6;
+  border: 1px dashed #876f47;
+}
+.tag-picker {
+  margin-bottom: 1.1rem;
+}
+.tag-picker .tag-list {
+  margin-top: 0.65rem;
+}
+.tag-options {
+  list-style: none;
+  padding: 0;
+  margin: 0.35rem 0 0;
+  max-height: 14rem;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 0.35rem;
+}
+.tag-options li {
+  display: grid;
+  align-content: center;
+  min-height: 44px;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.tag-options li + li {
+  border-top: 1px solid var(--line);
+}
+.tag-options li:hover,
+.tag-options li[aria-selected='true'] {
+  background: #e5f0df;
+}
+.tag-options small {
+  color: var(--muted);
 }
 .collection-options {
   max-height: 18rem;

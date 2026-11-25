@@ -13,7 +13,6 @@ export interface TagRevision {
   revision: number;
   createdAt: number;
   name: string;
-  slug: string;
   aliases: string[];
   notes: string;
 }
@@ -22,7 +21,6 @@ export interface TagDraftSummary {
   tagId: string;
   revision: number;
   name: string;
-  slug: string;
   publishedRevision: number | null;
 }
 

@@ -366,13 +366,13 @@ export class CollectionRepository {
   async assignPhotos(
     photos: readonly PhotoDraftSelection[],
     collectionIds: readonly string[],
+    tagIds: readonly string[] = [],
+    tagNames: readonly string[] = [],
   ) {
-    if (
-      !Array.isArray(collectionIds) ||
-      !collectionIds.length ||
-      collectionIds.length > 30
-    )
-      invalid('Choose between 1 and 30 collections.');
+    if (!Array.isArray(collectionIds) || collectionIds.length > 30)
+      invalid('Choose at most 30 collections.');
+    if (!collectionIds.length && !tagIds.length && !tagNames.length)
+      invalid('Choose tags or collections to assign.');
     const required: string[] = [];
     for (const id of new Set(collectionIds)) {
       const collection = await this.getDraft(id);
@@ -384,8 +384,10 @@ export class CollectionRepository {
         );
       required.push(...collection.tagIds);
     }
-    return new CatalogueRepository(this.db).addTagsToPhotoDrafts(photos, [
-      ...new Set(required),
-    ]);
+    return new CatalogueRepository(this.db).addTagsToPhotoDrafts(
+      photos,
+      [...new Set([...required, ...tagIds])],
+      tagNames,
+    );
   }
 }

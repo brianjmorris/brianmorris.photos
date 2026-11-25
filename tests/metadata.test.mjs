@@ -257,7 +257,6 @@ describe('metadata, evidence, and places on local D1', () => {
   it('retains metadata on tag-only edits and retains tags on metadata-only edits', async () => {
     const tag = await catalogue.createTag({
       name: 'Metadata boats',
-      slug: 'metadata-boats',
     });
     const photo = await catalogue.createPhoto([tag.tagId]);
     const saved = await catalogue.savePhotoMetadataDraft(photo.photoId, 1, {
