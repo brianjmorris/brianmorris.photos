@@ -14,8 +14,6 @@ npm ci
 npm run dev
 ```
 
-Open <http://127.0.0.1:4321>.
-
 ## Commands
 
 | Command           | Description                                        |
