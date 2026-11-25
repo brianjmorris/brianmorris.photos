@@ -82,7 +82,7 @@ export class CollectionRepository {
   private statement(sql: string, ...values: (string | number | null)[]) {
     return this.db.prepare(sql).bind(...values);
   }
-  private revisionStatements(
+  private draftStatements(
     id: string,
     revision: number,
     input: CollectionInput,
@@ -90,7 +90,9 @@ export class CollectionRepository {
   ) {
     return [
       this.statement(
-        'INSERT INTO collection_revisions (collection_id, revision, created_at, name, notes, featured_order, cover_photo_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        revision === 1
+          ? 'INSERT INTO collection_drafts (collection_id, revision, created_at, name, notes, featured_order, cover_photo_id) VALUES (?, ?, ?, ?, ?, ?, ?)'
+          : 'UPDATE collection_drafts SET revision=?2, created_at=?3, name=?4, notes=?5, featured_order=?6, cover_photo_id=?7 WHERE collection_id=?1',
         id,
         revision,
         now,
@@ -127,9 +129,15 @@ export class CollectionRepository {
         now,
         JSON.stringify(input.tagIds),
       ),
-      ...this.revisionStatements(id, 1, input, now),
+      ...this.draftStatements(id, 1, input, now),
     ]);
-    return (await this.getRevision(id, 1))!;
+    return {
+      ...input,
+      tagIds: [...input.tagIds],
+      collectionId: id,
+      revision: 1,
+      createdAt: now,
+    };
   }
   async saveDraft(
     id: string,
@@ -155,9 +163,15 @@ export class CollectionRepository {
       );
     await writeCatalogueBatch(
       this.db,
-      this.revisionStatements(id, expectedRevision + 1, input, now),
+      this.draftStatements(id, expectedRevision + 1, input, now),
     );
-    return (await this.getRevision(id, expectedRevision + 1))!;
+    return {
+      ...input,
+      tagIds: [...input.tagIds],
+      collectionId: id,
+      revision: expectedRevision + 1,
+      createdAt: now,
+    };
   }
   async getRevision(
     id: string,
@@ -165,12 +179,24 @@ export class CollectionRepository {
   ): Promise<CollectionRevision | null> {
     validId(id);
     validRevision(revision);
+    return this.readState(id, revision);
+  }
+
+  private async readState(
+    id: string,
+    revision?: number,
+    published = false,
+  ): Promise<CollectionRevision | null> {
     const row = await this.statement(
-      `SELECT c.tag_set_key, r.created_at, r.name, r.notes, r.featured_order, r.cover_photo_id
-      FROM collection_revisions r JOIN collections c ON c.id = r.collection_id WHERE r.collection_id = ? AND r.revision = ?`,
+      `SELECT c.tag_set_key, r.revision, r.created_at, r.name, r.notes, r.featured_order, r.cover_photo_id
+      FROM ${published ? 'collection_public' : revision === undefined ? 'collection_drafts' : 'collection_states'} r JOIN collections c ON c.id = r.collection_id
+      ${published ? 'JOIN published_collections p ON p.collection_id=r.collection_id AND p.collection_revision=r.revision' : ''}
+      WHERE r.collection_id = ? ${revision === undefined ? '' : 'AND r.revision=?'}
+      ${published ? 'AND NOT EXISTS (SELECT 1 FROM collection_tags t WHERE t.collection_id=r.collection_id AND NOT EXISTS (SELECT 1 FROM published_tags pt WHERE pt.tag_id=t.tag_id))' : ''}`,
       id,
-      revision,
+      ...(revision === undefined ? [] : [revision]),
     ).first<{
+      revision: number;
       tag_set_key: string;
       created_at: number;
       name: string | null;
@@ -181,7 +207,7 @@ export class CollectionRepository {
     return row
       ? {
           collectionId: id,
-          revision,
+          revision: row.revision,
           createdAt: row.created_at,
           name: row.name,
           notes: row.notes,
@@ -193,13 +219,7 @@ export class CollectionRepository {
   }
   async getDraft(id: string): Promise<CollectionRevision | null> {
     validId(id);
-    const row = await this.statement(
-      'SELECT draft_revision FROM collections WHERE id = ?',
-      id,
-    ).first<{ draft_revision: number | null }>();
-    return row?.draft_revision
-      ? this.getRevision(id, row.draft_revision)
-      : null;
+    return this.readState(id);
   }
   async findDraft(
     tagIds: readonly string[],
@@ -208,25 +228,20 @@ export class CollectionRepository {
       'SELECT id, draft_revision FROM collections WHERE tag_set_key = ?',
       JSON.stringify(collectionTagIds(tagIds)),
     ).first<{ id: string; draft_revision: number }>();
-    return row ? this.getRevision(row.id, row.draft_revision) : null;
+    return row ? this.getDraft(row.id) : null;
   }
   async definingTags(id: string): Promise<{ tagId: string; name: string }[]> {
     validId(id);
     const rows = await this.statement(
       `SELECT t.tag_id, r.name FROM collection_tags t JOIN tags i ON i.id = t.tag_id
-      JOIN tag_revisions r ON r.tag_id = i.id AND r.revision = i.draft_revision WHERE t.collection_id = ? ORDER BY r.normalized_name, t.tag_id`,
+      JOIN tag_states r ON r.tag_id = i.id AND r.revision = i.draft_revision WHERE t.collection_id = ? ORDER BY r.normalized_name, t.tag_id`,
       id,
     ).all<{ tag_id: string; name: string }>();
     return rows.results.map((row) => ({ tagId: row.tag_id, name: row.name }));
   }
   async getPublished(id: string): Promise<CollectionRevision | null> {
     validId(id);
-    const row = await this.statement(
-      `SELECT p.collection_revision FROM published_collections p WHERE p.collection_id = ? AND NOT EXISTS (
-      SELECT 1 FROM collection_tags t WHERE t.collection_id = p.collection_id AND NOT EXISTS (SELECT 1 FROM published_tags pt WHERE pt.tag_id = t.tag_id))`,
-      id,
-    ).first<{ collection_revision: number }>();
-    return row ? this.getRevision(id, row.collection_revision) : null;
+    return this.readState(id, undefined, true);
   }
   async recognizePublished(
     tagIds: readonly string[],
@@ -247,8 +262,8 @@ export class CollectionRepository {
     const rows = await this.statement(
       `SELECT c.id, r.revision, r.name, r.notes <> '' AS has_notes, r.featured_order, p.collection_revision,
       (SELECT json_group_array(json_object('tagId', t.tag_id, 'name', tr.name)) FROM collection_tags t JOIN tags ti ON ti.id = t.tag_id
-      JOIN tag_revisions tr ON tr.tag_id = ti.id AND tr.revision = ti.draft_revision WHERE t.collection_id = c.id) AS tags
-      FROM collections c JOIN collection_revisions r ON r.collection_id = c.id AND r.revision = c.draft_revision
+      JOIN tag_states tr ON tr.tag_id = ti.id AND tr.revision = ti.draft_revision WHERE t.collection_id = c.id) AS tags
+      FROM collections c JOIN collection_states r ON r.collection_id = c.id AND r.revision = c.draft_revision
       LEFT JOIN published_collections p ON p.collection_id = c.id ${afterId ? 'WHERE c.id > ?' : ''} ORDER BY c.id LIMIT ?`,
       ...(afterId ? [afterId] : []),
       limit + 1,
@@ -281,7 +296,7 @@ export class CollectionRepository {
     if (afterId !== undefined) validId(afterId);
     const rows = await this.statement(
       `SELECT c.id, c.tag_set_key, r.name, r.featured_order, r.cover_photo_id FROM published_collections p
-      JOIN collections c ON c.id = p.collection_id JOIN collection_revisions r ON r.collection_id = c.id AND r.revision = p.collection_revision
+      JOIN collections c ON c.id = p.collection_id JOIN collection_states r ON r.collection_id = c.id AND r.revision = p.collection_revision
       WHERE r.name IS NOT NULL AND NOT EXISTS (SELECT 1 FROM collection_tags t WHERE t.collection_id = c.id
         AND NOT EXISTS (SELECT 1 FROM published_tags pt WHERE pt.tag_id = t.tag_id)) ${afterId ? 'AND c.id > ?' : ''} ORDER BY c.id LIMIT ?`,
       ...(afterId ? [afterId] : []),
@@ -321,7 +336,7 @@ export class CollectionRepository {
     // photo tags never disqualify a match. Labels come from published metadata.
     const rows = await this.statement(
       `SELECT p.photo_id, p.photo_revision, p.first_published_at, m.title FROM published_photo_tags p
-      LEFT JOIN photo_metadata_revisions m ON m.photo_id = p.photo_id AND m.photo_revision = p.photo_revision
+      LEFT JOIN photo_metadata_public m ON m.photo_id = p.photo_id AND m.photo_revision = p.photo_revision
       WHERE p.tag_id = (SELECT tag_id FROM collection_tags WHERE collection_id = ? ORDER BY tag_id LIMIT 1)
       AND NOT EXISTS (SELECT 1 FROM collection_tags t WHERE t.collection_id = ? AND NOT EXISTS (
         SELECT 1 FROM published_photo_tags other WHERE other.photo_id = p.photo_id AND other.tag_id = t.tag_id))

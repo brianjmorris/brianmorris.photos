@@ -276,15 +276,15 @@ describe('distinct collections on disposable D1', () => {
     );
     await assert.rejects(
       statement(
-        'UPDATE collection_revisions SET notes = ? WHERE collection_id = ?',
+        'UPDATE collection_drafts SET notes = ? WHERE collection_id = ?',
         'changed',
         c.collectionId,
       ).run(),
-      /immutable_collection_revision/,
+      /catalogue_revision_conflict/,
     );
     await assert.rejects(
       statement(
-        'INSERT INTO collection_revisions (collection_id, revision, created_at, name, notes, featured_order) VALUES (?, 2, 1, NULL, ?, 0)',
+        'INSERT INTO collection_drafts (collection_id, revision, created_at, name, notes, featured_order) VALUES (?, 2, 1, NULL, ?, 0)',
         c.collectionId,
         'Notes',
       ).run(),
@@ -322,7 +322,7 @@ describe('distinct collections on disposable D1', () => {
     }
     await assert.rejects(
       statement(
-        'INSERT INTO collection_revisions (collection_id, revision, created_at, name, notes, cover_photo_id) VALUES (?, 2, 1, NULL, ?, ?)',
+        'UPDATE collection_drafts SET revision=2, notes=?2, cover_photo_id=?3 WHERE collection_id=?1',
         c.collectionId,
         'Notes',
         partial.photoId,

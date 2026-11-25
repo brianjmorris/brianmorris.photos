@@ -1,8 +1,11 @@
 import { writeCatalogueBatch, type CatalogueDatabase } from './d1.ts';
 import {
   metadataStatement,
-  readPhotoMetadata,
+  metadataJsonSql,
+  photoMetadataFromJson,
   readPublishedPhotoMetadata,
+  readPublishedPhotoPlace,
+  readDraftPhotoPlace,
   type PhotoMetadataInput,
   type PublicPhotoMetadata,
 } from './metadata.ts';
@@ -33,6 +36,35 @@ export class CatalogueRepository {
     return this.db.prepare(sql).bind(...values);
   }
 
+  private photoRead(id: string, revision?: number) {
+    return this.statement(
+      `SELECT r.revision, r.created_at,
+      (SELECT json_group_array(tag_id) FROM (SELECT tag_id FROM ${revision === undefined ? 'photo_draft_tags' : 'photo_tags'} t
+        WHERE t.photo_id=r.photo_id AND t.photo_revision=r.revision ORDER BY tag_id)) AS tags_json,
+      ${metadataJsonSql('m')} AS metadata_json
+      FROM ${revision === undefined ? 'photo_drafts' : 'photo_states'} r
+      LEFT JOIN ${revision === undefined ? 'photo_metadata_drafts' : 'photo_metadata_states'} m ON m.photo_id=r.photo_id AND m.photo_revision=r.revision
+      WHERE r.photo_id=? ${revision === undefined ? '' : 'AND r.revision=?'}`,
+      id,
+      ...(revision === undefined ? [] : [revision]),
+    );
+  }
+
+  private photoResult(
+    id: string,
+    row: Record<string, unknown> | null,
+  ): PhotoRevision | null {
+    return row
+      ? {
+          photoId: id,
+          revision: row.revision as number,
+          createdAt: row.created_at as number,
+          tagIds: JSON.parse(row.tags_json as string),
+          metadata: photoMetadataFromJson(row.metadata_json as string | null),
+        }
+      : null;
+  }
+
   private photoStatements(
     id: string,
     revision: number,
@@ -49,17 +81,20 @@ export class CatalogueRepository {
     tagIds.forEach(validId);
     const uniqueTags = [...new Set(tagIds)];
     return [
+      this.statement('DELETE FROM photo_draft_tags WHERE photo_id = ?', id),
       metadataStatement(this.db, id, revision, metadata),
       ...uniqueTags.map((tagId) =>
         this.statement(
-          'INSERT INTO photo_tags (photo_id, photo_revision, tag_id) VALUES (?, ?, ?)',
+          'INSERT INTO photo_draft_tags (photo_id, photo_revision, tag_id) VALUES (?, ?, ?)',
           id,
           revision,
           tagId,
         ),
       ),
       this.statement(
-        'INSERT INTO photo_revisions (photo_id, revision, created_at) VALUES (?, ?, ?)',
+        revision === 1
+          ? 'INSERT INTO photo_drafts (photo_id, revision, created_at) VALUES (?, ?, ?)'
+          : 'UPDATE photo_drafts SET revision = ?2, created_at = ?3 WHERE photo_id = ?1',
         id,
         revision,
         now,
@@ -77,15 +112,16 @@ export class CatalogueRepository {
     now = Date.now(),
   ): Promise<PhotoRevision> {
     const id = crypto.randomUUID();
-    await writeCatalogueBatch(this.db, [
+    const result = await writeCatalogueBatch(this.db, [
       this.statement(
         'INSERT INTO photos (id, created_at) VALUES (?, ?)',
         id,
         now,
       ),
       ...this.photoStatements(id, 1, tagIds, now),
+      this.photoRead(id),
     ]);
-    return (await this.getPhotoRevision(id, 1))!;
+    return this.photoResult(id, result.at(-1)!.results[0])!;
   }
 
   async savePhotoDraft(
@@ -99,11 +135,11 @@ export class CatalogueRepository {
     if (!(await this.getPhotoDraft(id)))
       throw new CatalogueError('not_found', 'Photo not found.');
     const revision = expectedRevision + 1;
-    await writeCatalogueBatch(
-      this.db,
-      this.photoStatements(id, revision, tagIds, now),
-    );
-    return (await this.getPhotoRevision(id, revision))!;
+    const result = await writeCatalogueBatch(this.db, [
+      ...this.photoStatements(id, revision, tagIds, now),
+      this.photoRead(id),
+    ]);
+    return this.photoResult(id, result.at(-1)!.results[0])!;
   }
 
   async savePhotoMetadataDraft(
@@ -119,15 +155,15 @@ export class CatalogueRepository {
     if (current.revision !== expectedRevision)
       throw new CatalogueError('conflict', 'Photo revision changed.');
     const revision = expectedRevision + 1;
-    await writeCatalogueBatch(
-      this.db,
-      this.photoStatements(id, revision, current.tagIds, now, metadata),
-    );
-    return (await this.getPhotoRevision(id, revision))!;
+    const result = await writeCatalogueBatch(this.db, [
+      ...this.photoStatements(id, revision, current.tagIds, now, metadata),
+      this.photoRead(id),
+    ]);
+    return this.photoResult(id, result.at(-1)!.results[0])!;
   }
 
   // One transaction adds a union of required tags to every selected draft.
-  // Expected revisions and sequence triggers protect the whole batch from races.
+  // Expected versions and SQL counter guards protect the whole batch from races.
   async addTagsToPhotoDrafts(
     photos: readonly PhotoDraftSelection[],
     tagIds: readonly string[],
@@ -158,10 +194,14 @@ export class CatalogueRepository {
         ...this.photoStatements(photo.photoId, current.revision + 1, tags, now),
       );
     }
-    await writeCatalogueBatch(this.db, statements);
-    return Promise.all(
-      photos.map((photo) =>
-        this.getPhotoRevision(photo.photoId, photo.expectedRevision + 1),
+    const result = await writeCatalogueBatch(this.db, [
+      ...statements,
+      ...photos.map((photo) => this.photoRead(photo.photoId)),
+    ]);
+    return photos.map((photo, index) =>
+      this.photoResult(
+        photo.photoId,
+        result[statements.length + index].results[0],
       ),
     );
   }
@@ -175,11 +215,11 @@ export class CatalogueRepository {
       (SELECT json_group_array(json_object('tagId', tagged.tag_id, 'name', tagged.name)) FROM (
         SELECT pt.tag_id, tr.name FROM photo_tags pt
         JOIN tags t ON t.id = pt.tag_id
-        JOIN tag_revisions tr ON tr.tag_id = t.id AND tr.revision = t.draft_revision
+        JOIN tag_states tr ON tr.tag_id = t.id AND tr.revision = t.draft_revision
         WHERE pt.photo_id = p.id AND pt.photo_revision = p.draft_revision
         ORDER BY tr.name COLLATE NOCASE, pt.tag_id
       ) tagged) AS tags_json FROM photos p
-      LEFT JOIN photo_metadata_revisions m ON m.photo_id = p.id AND m.photo_revision = p.draft_revision
+      LEFT JOIN photo_metadata_states m ON m.photo_id = p.id AND m.photo_revision = p.draft_revision
       WHERE p.draft_revision IS NOT NULL ${afterId ? 'AND p.id > ?' : ''} ORDER BY p.id LIMIT ?`,
       ...(afterId ? [afterId] : []),
       limit + 1,
@@ -207,41 +247,26 @@ export class CatalogueRepository {
     return readPublishedPhotoMetadata(this.db, id);
   }
 
+  async getPublishedPhotoPlace(id: string) {
+    return readPublishedPhotoPlace(this.db, id);
+  }
+
+  async getPhotoDraftPlace(id: string, location: 'private' | 'public') {
+    return readDraftPhotoPlace(this.db, id, location);
+  }
+
   async getPhotoRevision(
     id: string,
     revision: number,
   ): Promise<PhotoRevision | null> {
     validId(id);
     validRevision(revision);
-    const row = await this.statement(
-      'SELECT created_at FROM photo_revisions WHERE photo_id = ? AND revision = ?',
-      id,
-      revision,
-    ).first<{ created_at: number }>();
-    if (!row) return null;
-    const tags = await this.statement(
-      'SELECT tag_id FROM photo_tags WHERE photo_id = ? AND photo_revision = ? ORDER BY tag_id',
-      id,
-      revision,
-    ).all<{ tag_id: string }>();
-    return {
-      photoId: id,
-      revision,
-      createdAt: row.created_at,
-      tagIds: tags.results.map((tag) => tag.tag_id),
-      metadata: await readPhotoMetadata(this.db, id, revision),
-    };
+    return this.photoResult(id, await this.photoRead(id, revision).first());
   }
 
   async getPhotoDraft(id: string): Promise<PhotoRevision | null> {
     validId(id);
-    const head = await this.statement(
-      'SELECT draft_revision FROM photos WHERE id = ?',
-      id,
-    ).first<{ draft_revision: number | null }>();
-    return head?.draft_revision
-      ? this.getPhotoRevision(id, head.draft_revision)
-      : null;
+    return this.photoResult(id, await this.photoRead(id).first());
   }
 
   private tagStatements(
@@ -275,7 +300,7 @@ export class CatalogueRepository {
         invalid('Aliases must be distinct from the name and each other.');
       seen.add(normalized);
       return this.statement(
-        'INSERT INTO tag_aliases (tag_id, tag_revision, alias, normalized_alias) VALUES (?, ?, ?, ?)',
+        'INSERT INTO tag_draft_aliases (tag_id, tag_revision, alias, normalized_alias) VALUES (?, ?, ?, ?)',
         id,
         revision,
         alias,
@@ -283,9 +308,12 @@ export class CatalogueRepository {
       );
     });
     return [
+      this.statement('DELETE FROM tag_draft_aliases WHERE tag_id = ?', id),
       ...aliasStatements,
       this.statement(
-        'INSERT INTO tag_revisions (tag_id, revision, created_at, name, normalized_name, slug, notes) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        revision === 1
+          ? 'INSERT INTO tag_drafts (tag_id, revision, created_at, name, normalized_name, slug, notes) VALUES (?, ?, ?, ?, ?, ?, ?)'
+          : 'UPDATE tag_drafts SET revision=?2, created_at=?3, name=?4, normalized_name=?5, slug=?6, notes=?7 WHERE tag_id=?1',
         id,
         revision,
         now,
@@ -302,17 +330,56 @@ export class CatalogueRepository {
     ];
   }
 
+  private tagRead(id: string, revision?: number, published = false) {
+    const table = published
+      ? 'tag_public'
+      : revision === undefined
+        ? 'tag_drafts'
+        : 'tag_states';
+    const aliases = published
+      ? 'tag_public_aliases'
+      : revision === undefined
+        ? 'tag_draft_aliases'
+        : 'tag_aliases';
+    return this.statement(
+      `SELECT r.revision,r.name,r.slug,r.created_at,r.notes,
+      (SELECT json_group_array(alias) FROM (SELECT alias FROM ${aliases} a WHERE a.tag_id=r.tag_id AND a.tag_revision=r.revision ORDER BY normalized_alias)) AS aliases_json
+      FROM ${table} r ${published ? 'JOIN published_tags p ON p.tag_id=r.tag_id AND p.tag_revision=r.revision' : ''}
+      WHERE r.tag_id=? ${revision === undefined ? '' : 'AND r.revision=?'}`,
+      id,
+      ...(revision === undefined ? [] : [revision]),
+    );
+  }
+
+  private tagResult(
+    id: string,
+    row: Record<string, unknown> | null,
+  ): TagRevision | null {
+    return row
+      ? {
+          tagId: id,
+          revision: row.revision as number,
+          createdAt: row.created_at as number,
+          name: row.name as string,
+          slug: row.slug as string,
+          notes: row.notes as string,
+          aliases: JSON.parse(row.aliases_json as string),
+        }
+      : null;
+  }
+
   async createTag(input: TagInput, now = Date.now()): Promise<TagRevision> {
     const id = crypto.randomUUID();
-    await writeCatalogueBatch(this.db, [
+    const result = await writeCatalogueBatch(this.db, [
       this.statement(
         'INSERT INTO tags (id, created_at) VALUES (?, ?)',
         id,
         now,
       ),
       ...this.tagStatements(id, 1, input, now),
+      this.tagRead(id),
     ]);
-    return (await this.getTagRevision(id, 1))!;
+    return this.tagResult(id, result.at(-1)!.results[0])!;
   }
 
   async saveTagDraft(
@@ -331,11 +398,11 @@ export class CatalogueRepository {
         'This tag changed in another window. Reload it before saving.',
       );
     const revision = expectedRevision + 1;
-    await writeCatalogueBatch(
-      this.db,
-      this.tagStatements(id, revision, input, now),
-    );
-    return (await this.getTagRevision(id, revision))!;
+    const result = await writeCatalogueBatch(this.db, [
+      ...this.tagStatements(id, revision, input, now),
+      this.tagRead(id),
+    ]);
+    return this.tagResult(id, result.at(-1)!.results[0])!;
   }
 
   async getTagRevision(
@@ -344,42 +411,12 @@ export class CatalogueRepository {
   ): Promise<TagRevision | null> {
     validId(id);
     validRevision(revision);
-    const row = await this.statement(
-      'SELECT name, slug, created_at, notes FROM tag_revisions WHERE tag_id = ? AND revision = ?',
-      id,
-      revision,
-    ).first<{
-      name: string;
-      slug: string;
-      created_at: number;
-      notes: string;
-    }>();
-    if (!row) return null;
-    const aliases = await this.statement(
-      'SELECT alias FROM tag_aliases WHERE tag_id = ? AND tag_revision = ? ORDER BY normalized_alias',
-      id,
-      revision,
-    ).all<{ alias: string }>();
-    return {
-      tagId: id,
-      revision,
-      createdAt: row.created_at,
-      name: row.name,
-      slug: row.slug,
-      aliases: aliases.results.map((entry) => entry.alias),
-      notes: row.notes,
-    };
+    return this.tagResult(id, await this.tagRead(id, revision).first());
   }
 
   async getTagDraft(id: string): Promise<TagRevision | null> {
     validId(id);
-    const head = await this.statement(
-      'SELECT draft_revision FROM tags WHERE id = ?',
-      id,
-    ).first<{ draft_revision: number | null }>();
-    return head?.draft_revision
-      ? this.getTagRevision(id, head.draft_revision)
-      : null;
+    return this.tagResult(id, await this.tagRead(id).first());
   }
 
   async findDraftTag(name: string): Promise<TagRevision | null> {
@@ -414,14 +451,14 @@ export class CatalogueRepository {
       invalid('Invalid page size.');
     const after = afterId
       ? await this.statement(
-          'SELECT r.normalized_name FROM tags t JOIN tag_revisions r ON r.tag_id = t.id AND r.revision = t.draft_revision WHERE t.id = ?',
+          'SELECT r.normalized_name FROM tags t JOIN tag_states r ON r.tag_id = t.id AND r.revision = t.draft_revision WHERE t.id = ?',
           afterId,
         ).first<{ normalized_name: string }>()
       : null;
     if (afterId && !after) invalid('The tag page is no longer available.');
     const rows = await this.statement(
       `SELECT t.id, r.revision, r.name, r.slug, p.tag_revision AS published_revision
-       FROM tag_revisions r JOIN tags t ON t.id = r.tag_id AND t.draft_revision = r.revision
+       FROM tag_states r JOIN tags t ON t.id = r.tag_id AND t.draft_revision = r.revision
        LEFT JOIN published_tags p ON p.tag_id = t.id
        ${after ? 'WHERE (r.normalized_name, t.id) > (?, ?)' : ''}
        ORDER BY r.normalized_name, t.id LIMIT ?`,
@@ -461,7 +498,7 @@ export class CatalogueRepository {
     }
     const rows = await this.statement(
       `SELECT p.photo_id, p.photo_revision, p.first_published_at, m.title
-       FROM published_photo_tags p LEFT JOIN photo_metadata_revisions m
+       FROM published_photo_tags p LEFT JOIN photo_metadata_public m
        ON m.photo_id = p.photo_id AND m.photo_revision = p.photo_revision
        WHERE p.tag_id = ? ${after ? 'AND (p.first_published_at, p.photo_id) < (?, ?)' : ''}
        ORDER BY p.first_published_at DESC, p.photo_id DESC LIMIT ?`,
@@ -496,11 +533,7 @@ export class CatalogueRepository {
 
   async getPublishedTag(id: string): Promise<TagRevision | null> {
     validId(id);
-    const head = await this.statement(
-      'SELECT tag_revision FROM published_tags WHERE tag_id = ?',
-      id,
-    ).first<{ tag_revision: number }>();
-    return head ? this.getTagRevision(id, head.tag_revision) : null;
+    return this.tagResult(id, await this.tagRead(id, undefined, true).first());
   }
 
   // Storage-level bounded read only. Versioned public DTOs/cursors follow later.

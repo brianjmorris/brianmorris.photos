@@ -17,9 +17,11 @@ export interface CatalogueDatabase {
 export async function writeCatalogueBatch(
   db: CatalogueDatabase,
   statements: CatalogueStatement[],
-): Promise<void> {
+): Promise<{ results: Record<string, unknown>[] }[]> {
   try {
-    await db.batch(statements);
+    return (await db.batch(statements)) as {
+      results: Record<string, unknown>[];
+    }[];
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
     if (/invalid_collection_cover/.test(message))

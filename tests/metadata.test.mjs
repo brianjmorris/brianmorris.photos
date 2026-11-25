@@ -247,10 +247,7 @@ describe('metadata, evidence, and places on local D1', () => {
     assert.deepEqual(saved.metadata.keywords, ['boats', 'été']);
     assert.equal(saved.metadata.title, input.title);
     assert.equal(saved.metadata.caption, input.caption);
-    assert.equal(
-      (await catalogue.getPhotoRevision(photo.photoId, 1)).metadata,
-      null,
-    );
+    assert.equal(await catalogue.getPhotoRevision(photo.photoId, 1), null);
     assert.equal(
       (await sources.get(source.id)).captureText,
       '2024:11:03 01:30:00',
@@ -279,10 +276,7 @@ describe('metadata, evidence, and places on local D1', () => {
     );
     assert.equal(cleared.metadata.title, null);
     assert.deepEqual(cleared.metadata.rights.creators, []);
-    assert.equal(
-      (await catalogue.getPhotoRevision(photo.photoId, 2)).metadata.title,
-      'Keep me',
-    );
+    assert.equal(await catalogue.getPhotoRevision(photo.photoId, 2), null);
   });
 
   it('preserves unknown, date-only, and offset-free capture uncertainty', () => {
@@ -511,14 +505,14 @@ describe('metadata, evidence, and places on local D1', () => {
     assert.equal(await catalogue.getPhotoRevision(second.photoId, 2), null);
     assert.equal(
       await statement(
-        'SELECT * FROM photo_metadata_revisions WHERE photo_id = ?',
+        'SELECT * FROM photo_metadata_states WHERE photo_id = ?',
         second.photoId,
       ).first(),
       null,
     );
   });
 
-  it('rejects stale and competing metadata saves and seals metadata snapshots', async () => {
+  it('rejects stale and competing metadata saves and unversioned SQL edits', async () => {
     const photo = await catalogue.createPhoto();
     const results = await Promise.allSettled([
       catalogue.savePhotoMetadataDraft(photo.photoId, 1, {
@@ -545,24 +539,24 @@ describe('metadata, evidence, and places on local D1', () => {
     );
     await assert.rejects(
       statement(
-        'UPDATE photo_metadata_revisions SET title = ? WHERE photo_id = ?',
+        'UPDATE photo_metadata_drafts SET title = ? WHERE photo_id = ?',
         'Mutation',
         photo.photoId,
       ).run(),
     );
     await assert.rejects(
       statement(
-        'DELETE FROM photo_metadata_revisions WHERE photo_id = ?',
+        'DELETE FROM photo_metadata_drafts WHERE photo_id = ?',
         photo.photoId,
       ).run(),
     );
     await assert.rejects(
       statement(
-        `INSERT INTO photo_metadata_revisions SELECT photo_id, 1, source_id,
+        `INSERT INTO photo_metadata_states SELECT photo_id, 1, source_id,
       title, caption, alt_text, keywords_json, creators_json, copyright_owners_json, copyright_notice, credit_line, usage_terms, rights_url, public_contact_url,
       capture_precision, capture_date, capture_time, capture_subseconds, offset_minutes, time_zone, offset_source, capture_utc, clock_correction_seconds, correction_reason,
       private_place_id, private_place_revision, private_latitude, private_longitude, public_visibility, public_place_id, public_place_revision, public_latitude, public_longitude, public_radius_meters
-      FROM photo_metadata_revisions WHERE photo_id = ? AND photo_revision = 2`,
+      FROM photo_metadata_states WHERE photo_id = ? AND photo_revision = 2`,
         photo.photoId,
       ).run(),
     );
@@ -603,7 +597,7 @@ describe('metadata, evidence, and places on local D1', () => {
     );
   });
 
-  it('pins parent revisions and preserves published location references through place renames', async () => {
+  it('freezes selected places and ancestry while newer place drafts replace old versions', async () => {
     const parent = await places.create({
       name: 'Original region',
       kind: 'region',
@@ -628,10 +622,12 @@ describe('metadata, evidence, and places on local D1', () => {
       1,
       placeInput('Draft city name', { placeId: parent.placeId, revision: 2 }),
     );
-    assert.equal((await places.getRevision(ref(city))).name, 'Original city');
-    assert.equal(
-      (await places.ancestors(ref(city)))[0].name,
-      'Original region',
+    assert.equal(await places.getRevision(ref(city)), null);
+    assert.deepEqual(
+      (await catalogue.getPublishedPhotoPlace(photo.photoId)).map(
+        (p) => p.name,
+      ),
+      ['Original city', 'Original region'],
     );
     assert.deepEqual(
       (await catalogue.getPublishedPhotoMetadata(photo.photoId)).publicLocation
@@ -696,7 +692,7 @@ describe('metadata, evidence, and places on local D1', () => {
     assert.equal((await places.getDraft(root.placeId)).revision, 1);
   });
 
-  it('rejects competing place edits and direct mutations of snapshots or aliases', async () => {
+  it('rejects competing place edits and retains only the winning draft and aliases', async () => {
     const place = await places.create({
       ...placeInput('Concurrent place'),
       aliases: ['Old alias'],
@@ -722,32 +718,34 @@ describe('metadata, evidence, and places on local D1', () => {
       ).length,
       1,
     );
-    for (const sql of [
-      'UPDATE place_revisions SET name = ? WHERE place_id = ?',
-      'UPDATE place_aliases SET alias = ? WHERE place_id = ?',
-    ])
+    for (const sql of ['UPDATE place_drafts SET name = ? WHERE place_id = ?'])
       await assert.rejects(statement(sql, 'mutation', place.placeId).run());
     await assert.rejects(
       statement(
-        'DELETE FROM place_revisions WHERE place_id = ?',
+        'DELETE FROM place_drafts WHERE place_id = ?',
         place.placeId,
       ).run(),
     );
     await assert.rejects(
       statement(
-        'DELETE FROM place_aliases WHERE place_id = ?',
-        place.placeId,
-      ).run(),
-    );
-    await assert.rejects(
-      statement(
-        'INSERT INTO place_aliases VALUES (?, 1, ?, ?)',
+        'INSERT INTO place_draft_aliases VALUES (?, 1, ?, ?)',
         place.placeId,
         'Late alias',
         'late alias',
       ).run(),
     );
-    assert.deepEqual(await places.getRevision(ref(place)), place);
+    assert.equal(await places.getRevision(ref(place)), null);
+    const winner = results.find((r) => r.status === 'fulfilled').value;
+    assert.deepEqual(await places.getDraft(place.placeId), winner);
+    assert.equal(
+      (
+        await statement(
+          'SELECT COUNT(*) AS n FROM place_draft_aliases WHERE place_id=?',
+          place.placeId,
+        ).first()
+      ).n,
+      1,
+    );
   });
 
   it('validates rights URLs, place types, bounds and required provenance', async () => {
@@ -799,12 +797,12 @@ describe('metadata, evidence, and places on local D1', () => {
   it('uses indexed public metadata and bounded parent lookup plans', async () => {
     const plans = [
       await statement(
-        `EXPLAIN QUERY PLAN SELECT m.title FROM published_photos p JOIN photo_metadata_revisions m
+        `EXPLAIN QUERY PLAN SELECT m.title FROM published_photos p JOIN photo_metadata_public m
         ON m.photo_id = p.photo_id AND m.photo_revision = p.photo_revision WHERE p.photo_id = ?`,
         'photo',
       ).all(),
       await statement(
-        'EXPLAIN QUERY PLAN SELECT name FROM place_revisions WHERE place_id = ? AND revision = ?',
+        'EXPLAIN QUERY PLAN SELECT name FROM place_drafts WHERE place_id = ? AND revision = ?',
         'place',
         1,
       ).all(),

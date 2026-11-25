@@ -17,7 +17,7 @@ export async function seedCatalogue(db, size, { dense = false } = {}) {
       tagJson,
     ),
     statement(
-      `INSERT INTO tag_revisions (tag_id, revision, created_at, name, normalized_name, slug) SELECT json_extract(value, '$.id'), 1, 0,
+      `INSERT INTO tag_drafts (tag_id, revision, created_at, name, normalized_name, slug) SELECT json_extract(value, '$.id'), 1, 0,
       json_extract(value, '$.name'), json_extract(value, '$.normalized'), json_extract(value, '$.slug') FROM json_each(?)`,
       tagJson,
     ),
@@ -70,12 +70,12 @@ export async function seedCatalogue(db, size, { dense = false } = {}) {
         json,
       ),
       statement(
-        `INSERT INTO photo_tags SELECT json_extract(p.value, '$.id'), 1, t.value
+        `INSERT INTO photo_draft_tags SELECT json_extract(p.value, '$.id'), 1, t.value
         FROM json_each(?) p, json_each(p.value, '$.tagIds') t`,
         json,
       ),
       statement(
-        "INSERT INTO photo_revisions SELECT json_extract(value, '$.id'), 1, 0 FROM json_each(?)",
+        "INSERT INTO photo_drafts SELECT json_extract(value, '$.id'), 1, 0 FROM json_each(?)",
         json,
       ),
       statement(
@@ -90,7 +90,7 @@ export async function seedCatalogue(db, size, { dense = false } = {}) {
       statement(
         `INSERT INTO published_photo_tags
         SELECT p.photo_id, p.photo_revision, t.tag_id, p.first_published_at
-        FROM published_photos p JOIN photo_tags t
+        FROM published_photos p JOIN photo_draft_tags t
           ON t.photo_id = p.photo_id AND t.photo_revision = p.photo_revision
         JOIN published_tags pt ON pt.tag_id = t.tag_id
         WHERE p.photo_id IN (SELECT json_extract(value, '$.id') FROM json_each(?))`,

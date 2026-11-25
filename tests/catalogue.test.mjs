@@ -65,7 +65,7 @@ describe('local D1 catalogue', () => {
     await applyLocalMigrations(db);
     assert.equal(
       await scalar('SELECT COUNT(*) FROM catalogue_test_migrations'),
-      5,
+      6,
     );
     assert.deepEqual(
       (await db.prepare('PRAGMA foreign_key_check').all()).results,
@@ -155,7 +155,7 @@ describe('local D1 catalogue', () => {
     assert.equal(await scalar('SELECT COUNT(*) FROM tags'), count);
   });
 
-  it('keeps stable tag IDs, historical aliases and reserved slugs through renames', async () => {
+  it('keeps stable tag IDs and reserved slugs while replacing obsolete aliases', async () => {
     const first = await tag();
     const second = await repository.saveTagDraft(
       first.tagId,
@@ -169,7 +169,7 @@ describe('local D1 catalogue', () => {
     );
     assert.equal(second.tagId, first.tagId);
     assert.equal(second.revision, 2);
-    assert.deepEqual(await repository.getTagRevision(first.tagId, 1), first);
+    assert.equal(await repository.getTagRevision(first.tagId, 1), null);
     assert.equal(await repository.findDraftTag(first.aliases[0]), null);
     assert.equal(
       (await repository.findDraftTag('RENAMED ALIAS')).tagId,
@@ -226,10 +226,7 @@ describe('local D1 catalogue', () => {
     );
     assert.deepEqual(next.tagIds, [first.tagId, second.tagId].sort());
     assert.equal(next.photoId, photo.photoId);
-    assert.deepEqual(
-      await repository.getPhotoRevision(photo.photoId, 1),
-      photo,
-    );
+    assert.deepEqual(await repository.getPhotoRevision(photo.photoId, 1), null);
   });
 
   it('rejects orphan relationships and rolls back failed draft creation and saves', async () => {
@@ -328,21 +325,84 @@ describe('local D1 catalogue', () => {
     assert.equal((await repository.getPhotoDraft(photo.photoId)).revision, 2);
   });
 
-  it('seals revisions, memberships, aliases, and stable identities against SQL mutation', async () => {
+  it('returns the committed photo snapshot when another edit completes before the response', async () => {
+    const photo = await repository.createPhoto();
+    let interleaved = false;
+    const racing = new CatalogueRepository({
+      prepare: (sql) => db.prepare(sql),
+      async batch(statements) {
+        const result = await db.batch(statements);
+        if (!interleaved) {
+          interleaved = true;
+          await repository.savePhotoMetadataDraft(photo.photoId, 2, {
+            title: 'Later edit',
+          });
+        }
+        return result;
+      },
+    });
+    const saved = await racing.savePhotoMetadataDraft(photo.photoId, 1, {
+      title: 'My committed edit',
+    });
+    assert.equal(saved.revision, 2);
+    assert.equal(saved.metadata.title, 'My committed edit');
+    const current = await repository.getPhotoDraft(photo.photoId);
+    assert.equal(current.revision, 3);
+    assert.equal(current.metadata.title, 'Later edit');
+    assert.equal(await repository.getPhotoRevision(photo.photoId, 2), null);
+  });
+
+  it('rolls back every selected draft when a later photograph changes after batch preparation', async () => {
+    const entry = await tag();
+    const first = await repository.createPhoto(),
+      second = await repository.createPhoto();
+    let interleaved = false;
+    const racing = new CatalogueRepository({
+      prepare: (sql) => db.prepare(sql),
+      async batch(statements) {
+        if (!interleaved) {
+          interleaved = true;
+          await repository.savePhotoMetadataDraft(second.photoId, 1, {
+            title: 'Other tab',
+          });
+        }
+        return db.batch(statements);
+      },
+    });
+    await assert.rejects(
+      racing.addTagsToPhotoDrafts(
+        [
+          { photoId: first.photoId, expectedRevision: 1 },
+          { photoId: second.photoId, expectedRevision: 1 },
+        ],
+        [entry.tagId],
+      ),
+      isError('conflict'),
+    );
+    assert.deepEqual(await repository.getPhotoDraft(first.photoId), first);
+    const current = await repository.getPhotoDraft(second.photoId);
+    assert.equal(current.revision, 2);
+    assert.equal(current.metadata.title, 'Other tab');
+    assert.deepEqual(current.tagIds, []);
+  });
+
+  it('keeps state views read-only and stable identities protected', async () => {
     const entry = await tag();
     const other = await tag();
     const photo = await repository.createPhoto([entry.tagId]);
     const mutations = [
       statement(
-        'UPDATE photo_revisions SET created_at = 1 WHERE photo_id = ?',
+        'UPDATE photo_states SET created_at = 1 WHERE photo_id = ?',
         photo.photoId,
       ),
-      statement(
-        'DELETE FROM photo_revisions WHERE photo_id = ?',
-        photo.photoId,
-      ),
+      statement('DELETE FROM photo_states WHERE photo_id = ?', photo.photoId),
       statement(
         'INSERT INTO photo_tags VALUES (?, 1, ?)',
+        photo.photoId,
+        other.tagId,
+      ),
+      statement(
+        'INSERT INTO photo_draft_tags (photo_id,photo_revision,tag_id) VALUES (?,1,?)',
         photo.photoId,
         other.tagId,
       ),
@@ -353,13 +413,19 @@ describe('local D1 catalogue', () => {
         photo.photoId,
       ),
       statement(
-        'UPDATE tag_revisions SET name = ? WHERE tag_id = ?',
+        'UPDATE tag_states SET name = ? WHERE tag_id = ?',
         'Changed',
         entry.tagId,
       ),
-      statement('DELETE FROM tag_revisions WHERE tag_id = ?', entry.tagId),
+      statement('DELETE FROM tag_states WHERE tag_id = ?', entry.tagId),
       statement(
         'INSERT INTO tag_aliases VALUES (?, 1, ?, ?)',
+        entry.tagId,
+        'Late alias',
+        'late alias',
+      ),
+      statement(
+        'INSERT INTO tag_draft_aliases (tag_id,tag_revision,alias,normalized_alias) VALUES (?,1,?,?)',
         entry.tagId,
         'Late alias',
         'late alias',

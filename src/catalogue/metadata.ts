@@ -1,5 +1,6 @@
 import type { CatalogueDatabase } from './d1.ts';
 import { invalid } from './model.ts';
+import { placeChainSql, type PlaceDescription } from './place-snapshot.ts';
 import {
   coordinates,
   placeReference,
@@ -336,6 +337,10 @@ const PUBLIC_COLUMNS = [
 ] as const satisfies readonly (keyof MetadataRow)[];
 type PublicMetadataRow = Pick<MetadataRow, (typeof PUBLIC_COLUMNS)[number]>;
 
+export function metadataJsonSql(alias: string): string {
+  return `CASE WHEN ${alias}.photo_id IS NULL THEN NULL ELSE json_object(${COLUMNS.map((column) => `'${column}', ${alias}.${column}`).join(',')}) END`;
+}
+
 function inflatePublic(row: PublicMetadataRow): PublicPhotoMetadata {
   const place =
     row.public_place_id === null
@@ -401,17 +406,42 @@ export function metadataStatement(
   if (input === undefined)
     return db
       .prepare(
-        `INSERT INTO photo_metadata_revisions (photo_id, photo_revision, ${COLUMNS.join(',')})
-    SELECT photo_id, ?, ${COLUMNS.join(',')} FROM photo_metadata_revisions WHERE photo_id = ? AND photo_revision = ?`,
+        'UPDATE photo_metadata_drafts SET photo_revision = ? WHERE photo_id = ?',
       )
-      .bind(revision, photoId, revision - 1);
+      .bind(revision, photoId);
   const fields = flatten(normalizeMetadata(input));
+  // Reusing an already selected place keeps its frozen description even after
+  // that place's draft has changed. A new selection must name a current version.
+  const frozen = (
+    visibility: 'private' | 'public',
+  ) => `CASE WHEN :${visibility}_id IS NULL THEN NULL ELSE COALESCE(
+    (SELECT ${visibility}_place_json FROM photo_metadata_drafts WHERE photo_id = :photo
+      AND ${visibility}_place_id = :${visibility}_id AND ${visibility}_place_revision = :${visibility}_revision),
+    ${placeChainSql(`:${visibility}_id`, `:${visibility}_revision`)}
+  ) END`;
+  // D1 bindings are positional; numbered placeholders also let repeated SQL
+  // expressions refer to a value without creating additional parameters.
+  const parameters = [
+    photoId,
+    revision,
+    ...COLUMNS.map((column) => fields[column]),
+  ];
+  const parameter = (name: keyof MetadataRow) =>
+    `?${COLUMNS.indexOf(name) + 3}`;
+  const locationSql = (kind: 'private' | 'public') =>
+    frozen(kind)
+      .replaceAll(':photo', '?1')
+      .replaceAll(`:${kind}_id`, parameter(`${kind}_place_id`))
+      .replaceAll(`:${kind}_revision`, parameter(`${kind}_place_revision`));
   return db
     .prepare(
-      `INSERT INTO photo_metadata_revisions (photo_id, photo_revision, ${COLUMNS.join(',')})
-    VALUES (?, ?, ${COLUMNS.map(() => '?').join(',')})`,
+      `INSERT INTO photo_metadata_drafts (photo_id, photo_revision, ${COLUMNS.join(',')}, private_place_json, public_place_json)
+      VALUES (?1, ?2, ${COLUMNS.map((_, i) => `?${i + 3}`).join(',')}, ${locationSql('private')}, ${locationSql('public')})
+      ON CONFLICT(photo_id) DO UPDATE SET photo_revision=excluded.photo_revision,
+        ${COLUMNS.map((column) => `${column}=excluded.${column}`).join(',')},
+        private_place_json=excluded.private_place_json, public_place_json=excluded.public_place_json`,
     )
-    .bind(photoId, revision, ...COLUMNS.map((column) => fields[column]));
+    .bind(...parameters);
 }
 
 export async function readPhotoMetadata(
@@ -421,11 +451,23 @@ export async function readPhotoMetadata(
 ): Promise<PhotoMetadata | null> {
   const row = await db
     .prepare(
-      `SELECT ${COLUMNS.join(',')} FROM photo_metadata_revisions WHERE photo_id = ? AND photo_revision = ?`,
+      `SELECT ${COLUMNS.join(',')} FROM photo_metadata_states WHERE photo_id = ? AND photo_revision = ?`,
     )
     .bind(photoId, revision)
     .first<MetadataRow>();
   if (!row) return null;
+  return inflatePhotoMetadata(row);
+}
+
+export function photoMetadataFromJson(
+  value: string | null,
+): PhotoMetadata | null {
+  return value === null
+    ? null
+    : inflatePhotoMetadata(JSON.parse(value) as MetadataRow);
+}
+
+function inflatePhotoMetadata(row: MetadataRow): PhotoMetadata {
   const result = inflatePublic(row);
   return {
     ...result,
@@ -464,10 +506,45 @@ export async function readPublishedPhotoMetadata(
   const row = await db
     .prepare(
       `SELECT ${PUBLIC_COLUMNS.map((column) => `m.${column}`).join(',')}
-    FROM published_photos p JOIN photo_metadata_revisions m ON m.photo_id = p.photo_id AND m.photo_revision = p.photo_revision
+    FROM published_photos p JOIN photo_metadata_public m ON m.photo_id = p.photo_id AND m.photo_revision = p.photo_revision
     WHERE p.photo_id = ?`,
     )
     .bind(photoId)
     .first<PublicMetadataRow>();
   return row ? inflatePublic(row) : null;
+}
+
+// Resolve the selected place without consulting mutable place drafts. Only the
+// explicitly approved public location can enter this public read.
+export async function readPublishedPhotoPlace(
+  db: CatalogueDatabase,
+  photoId: string,
+): Promise<PlaceDescription[]> {
+  validId(photoId);
+  const row = await db
+    .prepare(
+      `SELECT m.public_place_json FROM published_photos p
+    JOIN photo_metadata_public m ON m.photo_id=p.photo_id AND m.photo_revision=p.photo_revision
+    WHERE p.photo_id=?`,
+    )
+    .bind(photoId)
+    .first<{ public_place_json: string | null }>();
+  return row?.public_place_json ? JSON.parse(row.public_place_json) : [];
+}
+
+export async function readDraftPhotoPlace(
+  db: CatalogueDatabase,
+  photoId: string,
+  location: 'private' | 'public',
+): Promise<PlaceDescription[]> {
+  validId(photoId);
+  if (location !== 'private' && location !== 'public')
+    invalid('Invalid location choice.');
+  const row = await db
+    .prepare(
+      `SELECT ${location}_place_json AS place_json FROM photo_metadata_drafts WHERE photo_id=?`,
+    )
+    .bind(photoId)
+    .first<{ place_json: string | null }>();
+  return row?.place_json ? JSON.parse(row.place_json) : [];
 }

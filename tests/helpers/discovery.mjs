@@ -125,7 +125,7 @@ export function discoverySource(db) {
         EXISTS (SELECT 1 FROM filtered m WHERE (m.first_published_at, m.photo_id) > (w.first_published_at, w.photo_id)) AS has_newer,
         EXISTS (SELECT 1 FROM filtered m WHERE (m.first_published_at, m.photo_id) < (w.first_published_at, w.photo_id)) AS has_older
       FROM window w JOIN published_photos p ON p.photo_id = w.photo_id
-      LEFT JOIN photo_metadata_revisions metadata ON metadata.photo_id = p.photo_id AND metadata.photo_revision = p.photo_revision
+      LEFT JOIN photo_metadata_public metadata ON metadata.photo_id = p.photo_id AND metadata.photo_revision = p.photo_revision
       ORDER BY w.first_published_at DESC, w.photo_id DESC`;
     return { sql, values };
   }
