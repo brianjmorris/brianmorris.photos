@@ -1,0 +1,142 @@
+---
+import { env } from 'cloudflare:workers';
+import { runDraftPhotoCleanup } from '../../authoring/photo-attachments.ts';
+import { DraftAttachmentRepository } from '../../catalogue/draft-attachments.ts';
+import EditorLayout from '../../components/dashboard/EditorLayout.astro';
+
+if (!Astro.locals.owner)
+  return new Response('Sign-in required.', { status: 403 });
+if (!['GET', 'HEAD', 'POST'].includes(Astro.request.method))
+  return new Response('Method not allowed.', {
+    status: 405,
+    headers: { Allow: 'GET, HEAD, POST' },
+  });
+
+let error = '';
+let runs: Awaited<ReturnType<DraftAttachmentRepository['latestCleanupRuns']>> =
+  [];
+const { CATALOGUE: database, DRAFT_PHOTOS: bucket } = env;
+let available = Boolean(database && bucket);
+if (database && bucket) {
+  if (Astro.request.method === 'POST') {
+    try {
+      await runDraftPhotoCleanup(database, bucket, 'manual');
+      return Astro.redirect('/dashboard/storage?ran=1', 303);
+    } catch {
+      error = 'Cleanup could not finish. You can retry the pass.';
+    }
+  }
+  try {
+    runs = await new DraftAttachmentRepository(database).latestCleanupRuns();
+  } catch {
+    available = false;
+  }
+}
+if (!available)
+  error = 'Draft photo storage status is temporarily unavailable.';
+if (error) Astro.response.status = 503;
+
+const runTypes = [
+  { trigger: 'scheduled', label: 'Scheduled cleanup' },
+  { trigger: 'manual', label: 'Manual cleanup' },
+] as const;
+const dateTime = new Intl.DateTimeFormat('en-CA', {
+  dateStyle: 'medium',
+  timeStyle: 'short',
+  timeZone: 'America/Toronto',
+});
+---
+
+<EditorLayout title="Draft photo storage">
+  {error && (
+    <p class="notice error" role="alert">
+      {error}
+    </p>
+  )}
+  {available && (
+    <>
+      {!error &&
+        Astro.url.searchParams.get('ran') === '1' &&
+        runs.some(
+          (run) => run.trigger === 'manual' && run.outcome === 'completed',
+        ) && (
+          <p class="notice" role="status">
+            Manual cleanup pass finished.
+          </p>
+        )}
+      <div class="cleanup-runs">
+        {runTypes.map(({ trigger, label }) => {
+          const run = runs.find((entry) => entry.trigger === trigger);
+          return (
+            <section class="panel">
+              <h2>{label}</h2>
+              {run ? (
+                <>
+                  <p>
+                    <strong>
+                      {run.outcome === 'completed' ? 'Completed' : 'Failed'}
+                    </strong>
+                    {' · '}
+                    <time datetime={new Date(run.finished_at).toISOString()}>
+                      {dateTime.format(run.finished_at)} ET
+                    </time>
+                  </p>
+                  {run.outcome === 'completed' && (
+                    <>
+                      <dl class="cleanup-counts">
+                        <div>
+                          <dt>Objects scanned</dt>
+                          <dd>{run.scanned}</dd>
+                        </div>
+                        <div>
+                          <dt>Retired attachments processed</dt>
+                          <dd>{run.retired_keys}</dd>
+                        </div>
+                        <div>
+                          <dt>Unreferenced objects processed</dt>
+                          <dd>{run.orphaned_keys}</dd>
+                        </div>
+                      </dl>
+                      <p class="hint">
+                        {run.more_work
+                          ? 'Another pass may be needed.'
+                          : 'The pass reached the end of the scan.'}
+                      </p>
+                    </>
+                  )}
+                </>
+              ) : (
+                <p class="hint">No runs recorded.</p>
+              )}
+            </section>
+          );
+        })}
+      </div>
+      <form method="post" action="/dashboard/storage">
+        <button type="submit">Run one cleanup pass</button>
+        <p class="hint">Continue from the saved scan position.</p>
+      </form>
+    </>
+  )}
+</EditorLayout>
+
+<style>
+  .cleanup-runs {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+    gap: 1rem;
+  }
+  .cleanup-counts {
+    margin-block: 1.5rem;
+  }
+  .cleanup-counts div {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    padding-block: 0.35rem;
+  }
+  .cleanup-counts dd {
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+  }
+</style>

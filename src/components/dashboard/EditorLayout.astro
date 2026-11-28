@@ -1,0 +1,156 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+interface Props {
+  title: string;
+  compactHeader?: boolean;
+}
+const { title, compactHeader = false } = Astro.props;
+---
+
+<BaseLayout title={title} description="Private photography drafts.">
+  <header class:list={{ compact: compactHeader }}>
+    <a href="/dashboard">Dashboard</a>
+    <h1>{title}</h1>
+    <nav aria-label="Photo tools">
+      <a href="/dashboard/tags">Tags</a>
+      <a href="/dashboard/collections">Collections</a>
+      <a href="/dashboard/photos">Photograph review</a>
+    </nav>
+  </header>
+  <slot />
+</BaseLayout>
+<style is:global>
+  main {
+    max-width: 72rem;
+    padding-block: 2.5rem;
+  }
+  header {
+    margin-bottom: 2rem;
+  }
+  header.compact {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 0.4rem 1.5rem;
+    margin-bottom: 1.25rem;
+  }
+  header.compact h1 {
+    font-size: clamp(1.5rem, 4vw, 2rem);
+    margin: 0;
+  }
+  header.compact nav {
+    grid-column: 1/-1;
+    margin: 0.5rem 0 0;
+  }
+  nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin-block: 1rem;
+  }
+  a {
+    color: #315642;
+    text-underline-offset: 0.2em;
+  }
+  .workspace {
+    display: grid;
+    grid-template-columns: minmax(13rem, 1fr) minmax(0, 2fr);
+    gap: 1.5rem;
+  }
+  .panel {
+    border: 1px solid #dedfd8;
+    border-radius: 0.5rem;
+    padding: 1.5rem;
+    background: #fff;
+  }
+  h2 {
+    margin-top: 0;
+    font-size: 1.35rem;
+  }
+  .hint,
+  .status {
+    color: #555b55;
+    font-size: 0.9rem;
+  }
+  .status {
+    display: block;
+  }
+  .notice {
+    padding: 1rem;
+    border: 1px solid #879f85;
+    background: #eef4ec;
+    border-radius: 0.25rem;
+  }
+  .error {
+    border-color: #b05c4b;
+    background: #fff0ec;
+  }
+  form > label,
+  fieldset > label:not(.choice) {
+    display: block;
+    margin: 1.1rem 0 0.3rem;
+    font-weight: 600;
+  }
+  input:not([type='checkbox']):not([type='hidden']),
+  textarea,
+  select {
+    box-sizing: border-box;
+    width: 100%;
+    padding: 0.65rem;
+    border: 1px solid #92998f;
+    border-radius: 0.25rem;
+    background: #fff;
+    color: #242424;
+    font: inherit;
+  }
+  textarea {
+    resize: vertical;
+  }
+  button {
+    padding: 0.7rem 1.2rem;
+    margin-top: 1rem;
+    border: 0;
+    border-radius: 0.3rem;
+    background: #315642;
+    color: white;
+    font: inherit;
+    cursor: pointer;
+  }
+  fieldset {
+    margin-top: 1.25rem;
+    border: 1px solid #dedfd8;
+  }
+  .choice {
+    display: flex;
+    align-items: baseline;
+    gap: 0.65rem;
+    padding: 0.6rem 0;
+  }
+  .records {
+    list-style: none;
+    padding: 0;
+  }
+  .records li + li {
+    border-top: 1px solid #e9eae4;
+  }
+  .records a {
+    display: block;
+    padding: 0.8rem 0.25rem;
+    overflow-wrap: anywhere;
+  }
+  .records [aria-current='page'] {
+    background: #edf2eb;
+  }
+  :focus-visible {
+    outline: 3px solid #8b6619;
+    outline-offset: 3px;
+  }
+  @media (max-width: 48rem) {
+    .workspace {
+      grid-template-columns: 1fr;
+    }
+    .panel {
+      padding: 1rem;
+    }
+  }
+</style>

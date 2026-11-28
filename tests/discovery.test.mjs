@@ -7,6 +7,8 @@ import {
   normalizeCollectionQuery,
 } from '../src/discovery/reader.ts';
 import { CatalogueRepository } from '../src/catalogue/repository.ts';
+import { CollectionRepository } from '../src/catalogue/collections.ts';
+import { photoQueryForTags } from '../src/discovery/selection.ts';
 import {
   applyLocalMigrations,
   createLocalCatalogue,
@@ -73,7 +75,7 @@ describe('portable public discovery contracts', () => {
       request({ filters: { unknown: 'ignored-filter' } }),
       request({ filters: { tagIds: null } }),
       request({ filters: { placeId: null } }),
-      request({ filters: { tagIds: Array(9).fill('a') } }),
+      request({ filters: { tagIds: Array(65).fill('a') } }),
       request({ filters: { placeId: '' } }),
       request({ cursor: 'a', anchorPhotoId: 'photo-1' }),
       request({ anchorPhotoId: '' }),
@@ -148,7 +150,7 @@ describe('portable public discovery contracts', () => {
       atob(first.nextCursor.replaceAll('-', '+').replaceAll('_', '/')),
     );
     for (const changed of [
-      { schema: 2 },
+      { schema: 1 },
       { direction: 'sideways' },
       { position: { firstPublishedAt: -1, photoId: 'p' } },
     ]) {
@@ -277,6 +279,106 @@ describe('portable public discovery contracts', () => {
     context.diagnostic(
       `Contract source gzip baseline (not a client bundle): ${bytes} bytes.`,
     );
+  });
+});
+
+describe('collection context uses the ordinary tag-filtered photo view', () => {
+  it('has identical pages, order, cursors and anchors when Name/Notes are added or changed', async () => {
+    const local = await createLocalCatalogue();
+    try {
+      await applyLocalMigrations(local.db);
+      const fixture = await seedDiscovery(local.db, 1000);
+      const source = discoverySource(local.db);
+      const tags = fixture.tags.slice(0, 2).map((t) => t.id);
+      const query = { version: 1, ...photoQueryForTags(tags) };
+      const ordinary = await readPublicCollection(source, query);
+      const repository = new CollectionRepository(local.db);
+      assert.equal(await repository.recognizePublished(tags), null);
+      const c = await repository.createDraft({
+        tagIds: [...tags].reverse(),
+        name: null,
+        notes: 'Context for these tags',
+        featuredOrder: null,
+        coverPhotoId: null,
+      });
+      await local.db
+        .prepare(
+          'INSERT INTO published_collections (collection_id, collection_revision) VALUES (?, 1)',
+        )
+        .bind(c.collectionId)
+        .run();
+      const context = await repository.recognizePublished(tags);
+      const decoratedQuery = {
+        version: 1,
+        ...photoQueryForTags(context.tagIds),
+      };
+      assert.deepEqual(query, decoratedQuery);
+      assert.deepEqual(
+        await readPublicCollection(source, decoratedQuery),
+        ordinary,
+      );
+      const next = { ...query, cursor: ordinary.nextCursor };
+      assert.deepEqual(
+        await readPublicCollection(source, next),
+        await readPublicCollection(source, {
+          ...decoratedQuery,
+          cursor: ordinary.nextCursor,
+        }),
+      );
+      const anchor = ordinary.items[10].photoId;
+      assert.deepEqual(
+        await readPublicCollection(source, { ...query, anchorPhotoId: anchor }),
+        await readPublicCollection(source, {
+          ...decoratedQuery,
+          anchorPhotoId: anchor,
+        }),
+      );
+      await repository.saveDraft(c.collectionId, 1, {
+        ...c,
+        name: 'A name without Notes',
+        notes: '',
+      });
+      await local.db
+        .prepare(
+          'UPDATE published_collections SET collection_revision = 2 WHERE collection_id = ?',
+        )
+        .bind(c.collectionId)
+        .run();
+      assert.equal(
+        (await repository.recognizePublished(tags)).name,
+        'A name without Notes',
+      );
+      assert.deepEqual(
+        await readPublicCollection(source, decoratedQuery),
+        ordinary,
+      );
+      const many = fixture.tags.slice(0, 64).map((t) => t.id);
+      const result = await readPublicCollection(source, {
+        version: 1,
+        ...photoQueryForTags(many),
+      });
+      assert(result.ok);
+      assert(
+        result.items.every(
+          (p) =>
+            fixture.expected.find((photo) => photo.id === p.photoId).tagIds
+              .length === 64,
+        ),
+      );
+      assert(
+        source.build({
+          version: 1,
+          query: normalizeCollectionQuery({
+            version: 1,
+            ...photoQueryForTags(many),
+          }),
+          limit: 24,
+          seek: { kind: 'start' },
+        }).values.length < 10,
+      );
+    } finally {
+      await local.close();
+    }
   });
 });
 

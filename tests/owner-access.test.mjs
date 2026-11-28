@@ -7,6 +7,12 @@ import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { Miniflare } from 'miniflare';
 import { createOwnerAuthorizer } from '../src/auth/owner.ts';
 import { guardOwnerRequest, isOwnerPath } from '../src/auth/guard.ts';
+import { applyLocalMigrations } from './helpers/catalogue.mjs';
+import { verifyCollectionEditor } from './helpers/collections-integration.mjs';
+import {
+  verifyDraftAttachments,
+  verifyDraftCleanup,
+} from './helpers/draft-attachments-integration.mjs';
 
 const issuer = 'https://synthetic-team.cloudflareaccess.com';
 const env = {
@@ -439,7 +445,7 @@ describe('private request boundary', () => {
     assert.equal(await failed.text(), 'Dashboard unavailable.');
   });
 
-  it('runs the built Worker with public access, missing setup, approved email changes and wrong-application rejection', async () => {
+  it('runs the built Worker with public access, identity checks and private editorial workflows', async () => {
     // Build current source instead of relying on potentially stale dist output.
     execFileSync(
       process.execPath,
@@ -504,6 +510,7 @@ describe('private request boundary', () => {
     }
     const configured = new Miniflare({
       host: '127.0.0.1',
+      unsafeTriggerHandlers: true,
       enableDevRegistry: false,
       telemetry: { enabled: false },
       workers: [
@@ -513,12 +520,28 @@ describe('private request boundary', () => {
             compatibilityDate: config.compatibility_date,
             compatibilityFlags: config.compatibility_flags,
             manifest: { mainModule: 'entry.mjs', modules },
-            env: Object.fromEntries(
-              Object.entries(env).map(([name, value]) => [
+            env: Object.fromEntries([
+              ...Object.entries(env).map(([name, value]) => [
                 name,
                 { type: 'text', value },
               ]),
-            ),
+              [
+                'CATALOGUE',
+                {
+                  type: 'd1',
+                  id: 'disposable-owner-collections',
+                  dev: { remote: false },
+                },
+              ],
+              [
+                'DRAFT_PHOTOS',
+                {
+                  type: 'r2',
+                  name: 'disposable-owner-draft-photos',
+                  dev: { remote: false },
+                },
+              ],
+            ]),
           },
           dev: {
             outboundService: {
@@ -579,6 +602,36 @@ describe('private request boundary', () => {
         assert.equal(denied.status, 401);
         assertPrivate(denied);
       }
+      const database = await configured.getD1Database('CATALOGUE');
+      const unavailable = await configured.dispatchFetch(
+        'https://photos.example.test/dashboard/collections',
+        { headers },
+      );
+      assert.equal(unavailable.status, 503);
+      assertPrivate(unavailable);
+      assert(!(await unavailable.text()).includes('no such table'));
+      await applyLocalMigrations(database);
+      await verifyCollectionEditor(
+        configured,
+        database,
+        headers,
+        assertPrivate,
+      );
+      const bucket = await configured.getR2Bucket('DRAFT_PHOTOS');
+      await verifyDraftAttachments(
+        configured,
+        database,
+        bucket,
+        headers,
+        assertPrivate,
+      );
+      await verifyDraftCleanup(
+        configured,
+        database,
+        bucket,
+        headers,
+        assertPrivate,
+      );
     } finally {
       await configured.dispose();
     }

@@ -1,4 +1,5 @@
 import { writeCatalogueBatch, type CatalogueDatabase } from './d1.ts';
+import { placeChainSql } from './place-snapshot.ts';
 import {
   CatalogueError,
   cleanTagName,
@@ -47,6 +48,8 @@ export interface PlaceRevision extends PlaceReference {
   };
 }
 interface PlaceRow {
+  revision: number;
+  aliases_json: string;
   created_at: number;
   name: string;
   kind: PlaceKind;
@@ -114,21 +117,29 @@ export class PlaceRepository {
     const children = Array.from(aliases, (value) => {
       const alias = cleanTagName(value);
       const normalized = normalizeTagName(alias);
-      if (seen.has(normalized))
-        invalid('Place aliases must be distinct within a revision.');
+      if (seen.has(normalized)) invalid('Place aliases must be distinct.');
       seen.add(normalized);
       return this.db
         .prepare(
-          'INSERT INTO place_aliases (place_id, place_revision, alias, normalized_alias) VALUES (?, ?, ?, ?)',
+          'INSERT INTO place_draft_aliases (place_id, place_revision, alias, normalized_alias) VALUES (?, ?, ?, ?)',
         )
         .bind(id, revision, alias, normalized);
     });
     return [
+      this.db
+        .prepare('DELETE FROM place_draft_aliases WHERE place_id = ?')
+        .bind(id),
       ...children,
       this.db
         .prepare(
-          `INSERT INTO place_revisions (place_id, revision, created_at, name, kind, parent_id, parent_revision,
-        south, north, west, east, provenance_kind, provenance_source, provider_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          revision === 1
+            ? `INSERT INTO place_drafts (place_id, revision, created_at, name, kind, parent_id, parent_revision,
+        south, north, west, east, provenance_kind, provenance_source, provider_id, ancestry_json)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ${placeChainSql('?6', '?7')})`
+            : `UPDATE place_drafts SET revision=?2, created_at=?3, name=?4, kind=?5, parent_id=?6, parent_revision=?7,
+          south=?8, north=?9, west=?10, east=?11, provenance_kind=?12, provenance_source=?13, provider_id=?14,
+          ancestry_json=CASE WHEN parent_id IS ?6 AND parent_revision IS ?7 THEN ancestry_json ELSE ${placeChainSql('?6', '?7')} END
+          WHERE place_id=?1`,
         )
         .bind(
           id,
@@ -154,13 +165,14 @@ export class PlaceRepository {
 
   async create(input: PlaceInput, now = Date.now()): Promise<PlaceRevision> {
     const id = crypto.randomUUID();
-    await writeCatalogueBatch(this.db, [
+    const result = await writeCatalogueBatch(this.db, [
       this.db
         .prepare('INSERT INTO places (id, created_at) VALUES (?, ?)')
         .bind(id, now),
       ...this.statements(id, 1, input, now),
+      this.readStatement(id),
     ]);
-    return (await this.getRevision({ placeId: id, revision: 1 }))!;
+    return this.result(id, result.at(-1)!.results[0] as unknown as PlaceRow)!;
   }
 
   async saveDraft(
@@ -173,49 +185,46 @@ export class PlaceRepository {
     validRevision(expectedRevision);
     if (!(await this.getDraft(id)))
       throw new CatalogueError('not_found', 'Place not found.');
-    await writeCatalogueBatch(
-      this.db,
-      this.statements(id, expectedRevision + 1, input, now),
-    );
-    return (await this.getRevision({
-      placeId: id,
-      revision: expectedRevision + 1,
-    }))!;
+    const result = await writeCatalogueBatch(this.db, [
+      ...this.statements(id, expectedRevision + 1, input, now),
+      this.readStatement(id),
+    ]);
+    return this.result(id, result.at(-1)!.results[0] as unknown as PlaceRow)!;
   }
 
   async getDraft(id: string): Promise<PlaceRevision | null> {
     validId(id);
-    const head = await this.db
-      .prepare('SELECT draft_revision FROM places WHERE id = ?')
-      .bind(id)
-      .first<{ draft_revision: number | null }>();
-    return head?.draft_revision
-      ? this.getRevision({ placeId: id, revision: head.draft_revision })
-      : null;
+    return this.result(id, await this.readStatement(id).first<PlaceRow>());
   }
 
   async getRevision(ref: PlaceReference): Promise<PlaceRevision | null> {
     placeReference(ref);
-    const row = await this.db
+    return this.result(
+      ref.placeId,
+      await this.readStatement(ref.placeId, ref.revision).first<PlaceRow>(),
+    );
+  }
+
+  private readStatement(id: string, revision?: number) {
+    return this.db
       .prepare(
-        'SELECT * FROM place_revisions WHERE place_id = ? AND revision = ?',
+        `SELECT p.revision,p.created_at,p.name,p.kind,p.parent_id,p.parent_revision,p.south,p.north,p.west,p.east,
+      p.provenance_kind,p.provenance_source,p.provider_id,
+      (SELECT json_group_array(alias) FROM (SELECT alias FROM place_draft_aliases a WHERE a.place_id=p.place_id AND a.place_revision=p.revision ORDER BY normalized_alias)) AS aliases_json
+      FROM place_drafts p WHERE p.place_id=? ${revision === undefined ? '' : 'AND p.revision=?'}`,
       )
-      .bind(ref.placeId, ref.revision)
-      .first<PlaceRow>();
+      .bind(id, ...(revision === undefined ? [] : [revision]));
+  }
+
+  private result(id: string, row: PlaceRow | null): PlaceRevision | null {
     if (!row) return null;
-    const aliases = await this.db
-      .prepare(
-        'SELECT alias FROM place_aliases WHERE place_id = ? AND place_revision = ? ORDER BY normalized_alias',
-      )
-      .bind(ref.placeId, ref.revision)
-      .all<{ alias: string }>();
     return {
-      placeId: ref.placeId,
-      revision: ref.revision,
+      placeId: id,
+      revision: row.revision,
       createdAt: row.created_at,
       name: row.name,
       kind: row.kind,
-      aliases: aliases.results.map((entry) => entry.alias),
+      aliases: JSON.parse(row.aliases_json),
       parent:
         row.parent_id === null
           ? null
@@ -245,11 +254,9 @@ export class PlaceRepository {
     placeReference(ref);
     const rows = await this.db
       .prepare(
-        `WITH RECURSIVE chain(place_id, revision, name, kind, parent_id, parent_revision, depth) AS (
-      SELECT place_id, revision, name, kind, parent_id, parent_revision, 0 FROM place_revisions WHERE place_id = ? AND revision = ?
-      UNION ALL SELECT p.place_id, p.revision, p.name, p.kind, p.parent_id, p.parent_revision, c.depth + 1
-      FROM place_revisions p JOIN chain c ON p.place_id = c.parent_id AND p.revision = c.parent_revision WHERE c.depth < 15
-    ) SELECT place_id, revision, name, kind FROM chain WHERE depth > 0 ORDER BY depth`,
+        `SELECT json_extract(a.value, '$.placeId') AS place_id, json_extract(a.value, '$.revision') AS revision,
+          json_extract(a.value, '$.name') AS name, json_extract(a.value, '$.kind') AS kind
+          FROM place_drafts p, json_each(p.ancestry_json) a WHERE p.place_id=? AND p.revision=? ORDER BY a.key`,
       )
       .bind(ref.placeId, ref.revision)
       .all<{

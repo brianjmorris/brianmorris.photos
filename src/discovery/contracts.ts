@@ -1,17 +1,18 @@
 // Portable public contracts. No database, owner metadata, or rendering imports.
-export const DISCOVERY_SCHEMA = 1;
+export const DISCOVERY_SCHEMA = 2;
 export const DEFAULT_PAGE_SIZE = 24;
 export const MAX_PAGE_SIZE = 50;
-export const MAX_FILTER_TAGS = 8;
+export const MAX_FILTER_TAGS = 64;
 export const PUBLIC_SORT = 'first-published-desc';
 
-export type CollectionReference =
+// View anchors are navigation/filter inputs, not editorial collections.
+export type PhotoViewReference =
   | { kind: 'tag'; id: string }
   | { kind: 'group'; id: string }
   | { kind: 'place'; id: string };
 
-export interface CollectionQuery {
-  collection: CollectionReference;
+export interface PhotoQuery {
+  collection: PhotoViewReference;
   // A group is a union; these tags are an additional intersection. Place
   // membership includes approved descendants, prepared outside public reads.
   filters?: { tagIds?: readonly string[]; placeId?: string };
@@ -19,16 +20,25 @@ export interface CollectionQuery {
 }
 
 export interface NormalizedQuery {
-  collection: CollectionReference;
+  collection: PhotoViewReference;
   filters: { tagIds: string[]; placeId: string | null };
   sort: typeof PUBLIC_SORT;
 }
 
-export interface PublicCollectionSummary {
-  reference: CollectionReference;
+export interface PublicViewSummary {
+  reference: PhotoViewReference;
   name: string;
   slug: string;
   photoCount: number;
+}
+
+// Optional editorial context decorates the SAME tag-filtered photo viewer.
+// It never chooses photo membership, ordering, page size or layout.
+export interface PublicCollectionContext {
+  collectionId: string;
+  tagIds: readonly string[];
+  name: string | null;
+  notes: string;
 }
 
 export interface PhotoPosition {
@@ -44,7 +54,7 @@ export interface PublicPhotoPreview extends PhotoPosition {
   altText: string | null;
 }
 
-export type DiscoveryRequest = CollectionQuery & {
+export type DiscoveryRequest = PhotoQuery & {
   version: number;
   limit?: number;
 } & (

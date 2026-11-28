@@ -4,8 +4,8 @@ import {
   MAX_FILTER_TAGS,
   MAX_PAGE_SIZE,
   PUBLIC_SORT,
-  type CollectionQuery,
-  type CollectionReference,
+  type PhotoQuery,
+  type PhotoViewReference,
   type DiscoveryError,
   type DiscoveryRequest,
   type DiscoveryResponse,
@@ -36,15 +36,13 @@ function version(value: unknown): asserts value is number {
   check(Number.isSafeInteger(value) && (value as number) > 0);
 }
 
-function reference(value: CollectionReference): CollectionReference {
+function reference(value: PhotoViewReference): PhotoViewReference {
   check(value && ['tag', 'group', 'place'].includes(value.kind));
   id(value.id);
   return { kind: value.kind, id: value.id };
 }
 
-export function normalizeCollectionQuery(
-  input: CollectionQuery,
-): NormalizedQuery {
+export function normalizeCollectionQuery(input: PhotoQuery): NormalizedQuery {
   check(input && typeof input === 'object');
   const collection = reference(input.collection);
   check(input.sort === undefined || input.sort === PUBLIC_SORT);

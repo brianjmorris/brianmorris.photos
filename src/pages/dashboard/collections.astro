@@ -1,0 +1,358 @@
+---
+import { env } from 'cloudflare:workers';
+import EditorLayout from '../../components/dashboard/EditorLayout.astro';
+import { CatalogueRepository } from '../../catalogue/repository.ts';
+import { CollectionRepository } from '../../catalogue/collections.ts';
+import {
+  CatalogueError,
+  invalid,
+  type CoverChoice,
+  type PublishedMembership,
+} from '../../catalogue/model.ts';
+import {
+  readCollectionBody,
+  collectionInput,
+  collectionError,
+} from '../../authoring/collections.ts';
+if (!Astro.locals.owner)
+  return new Response('Sign-in required.', { status: 403 });
+if (!['GET', 'HEAD', 'POST'].includes(Astro.request.method))
+  return new Response('Method not allowed.', {
+    status: 405,
+    headers: { Allow: 'GET, HEAD, POST' },
+  });
+const repository = env.CATALOGUE
+  ? new CollectionRepository(env.CATALOGUE)
+  : null;
+const tags = env.CATALOGUE ? new CatalogueRepository(env.CATALOGUE) : null;
+let error = '',
+  available = Boolean(repository);
+let id = Astro.url.searchParams.get('edit') ?? '';
+let values = {
+  tagNames: '',
+  name: '',
+  notes: '',
+  featured: '',
+  featuredOrder: '0',
+  coverPhotoId: '',
+  expectedRevision: '',
+};
+let listing: Awaited<ReturnType<CollectionRepository['listDrafts']>> = {
+  items: [],
+  nextAfter: null,
+};
+let covers: CoverChoice[] = [],
+  nextCover: PublishedMembership | null = null;
+if (repository && tags) {
+  if (Astro.request.method === 'POST') {
+    try {
+      const data = (await readCollectionBody(Astro.request, 'form')) as Record<
+        string,
+        string
+      >;
+      if (
+        Object.keys(data).some(
+          (key) => !['collectionId', ...Object.keys(values)].includes(key),
+        )
+      )
+        invalid('Unexpected collection field.');
+      values = { ...values, ...data };
+      id = data.collectionId ?? '';
+      if (data.featured !== undefined && data.featured !== 'on')
+        invalid('Invalid featured choice.');
+      if (data.featured && !/^(0|[1-9]\d*)$/.test(values.featuredOrder))
+        invalid('Enter a whole number for featured order.');
+      // Existing combinations use stable IDs if labels/aliases changed while
+      // this form was open in another window.
+      const current = id ? await repository.getDraft(id) : null;
+      if (id && !current)
+        throw new CatalogueError('not_found', 'Collection not found.');
+      const tagIds =
+        current?.tagIds ??
+        (await tags.resolveTagNames(
+          values.tagNames
+            .split(/\r?\n/)
+            .map((x) => x.trim())
+            .filter(Boolean),
+        ));
+      const { input, expectedRevision } = collectionInput(
+        {
+          tagIds,
+          name: values.name || null,
+          notes: values.notes,
+          featuredOrder: data.featured ? Number(values.featuredOrder) : null,
+          coverPhotoId: values.coverPhotoId || null,
+          ...(id ? { expectedRevision: Number(values.expectedRevision) } : {}),
+        },
+        Boolean(id),
+      );
+      const saved = id
+        ? await repository.saveDraft(id, expectedRevision!, input)
+        : await repository.createDraft(input);
+      return Astro.redirect(
+        `/dashboard/collections?edit=${encodeURIComponent(saved.collectionId)}&saved=1`,
+        303,
+      );
+    } catch (cause) {
+      const result = collectionError(cause);
+      error = result.message;
+      Astro.response.status = result.status;
+    }
+  }
+  try {
+    if (id && Astro.request.method !== 'POST') {
+      const collection = await repository.getDraft(id);
+      if (!collection)
+        throw new CatalogueError('not_found', 'Collection not found.');
+      values = {
+        tagNames: (await repository.definingTags(id))
+          .map((t) => t.name)
+          .join('\n'),
+        name: collection.name ?? '',
+        notes: collection.notes,
+        featured: collection.featuredOrder === null ? '' : 'on',
+        featuredOrder: String(collection.featuredOrder ?? 0),
+        coverPhotoId: collection.coverPhotoId ?? '',
+        expectedRevision: String(collection.revision),
+      };
+    }
+    listing = await repository.listDrafts(
+      Astro.url.searchParams.get('after') ?? undefined,
+    );
+    if (id) {
+      const beforeId = Astro.url.searchParams.get('coverBefore'),
+        beforeTime = Astro.url.searchParams.get('coverTime');
+      if (
+        (beforeId || beforeTime) &&
+        (!beforeId || !beforeTime || !/^(0|[1-9]\d*)$/.test(beforeTime))
+      )
+        invalid('Invalid cover page.');
+      const result = await repository.listCoverChoices(
+        id,
+        beforeId && beforeTime
+          ? { photoId: beforeId, firstPublishedAt: Number(beforeTime) }
+          : undefined,
+      );
+      covers = result.items;
+      nextCover = result.nextAfter;
+    }
+  } catch (cause) {
+    const result = collectionError(cause);
+    if (!error) error = result.message;
+    Astro.response.status = result.status;
+    if (result.status === 503 || result.status === 404) available = false;
+  }
+} else {
+  error = 'Collections are temporarily unavailable.';
+  Astro.response.status = 503;
+}
+---
+
+<EditorLayout title="Collections">
+  <p>
+    A name or Notes for two or more tags makes a collection. Photographs match
+    every defining tag and may have other tags too.
+  </p>
+  {error && (
+    <div class="notice error" role="alert">
+      <p>{error}</p>
+      {Astro.response.status === 409 && (
+        <a
+          href={
+            id
+              ? `/dashboard/collections?edit=${encodeURIComponent(id)}`
+              : '/dashboard/collections'
+          }
+        >
+          Reload the saved draft before trying again
+        </a>
+      )}
+    </div>
+  )}
+  {!error && Astro.url.searchParams.has('saved') && (
+    <p class="notice" role="status">
+      Draft saved. Published content has not changed.
+    </p>
+  )}
+  {available && (
+    <div class="workspace">
+      <section class="panel" aria-labelledby="collections-heading">
+        <h2 id="collections-heading">Saved combinations</h2>
+        <a href="/dashboard/collections">New collection</a>
+        <ul class="records">
+          {listing.items.map((collection) => (
+            <li>
+              <a
+                href={`/dashboard/collections?edit=${encodeURIComponent(collection.collectionId)}`}
+                aria-current={
+                  id === collection.collectionId ? 'page' : undefined
+                }
+              >
+                <strong>
+                  {collection.name ??
+                    collection.tags.map((t) => t.name).join(' + ')}
+                </strong>
+                {collection.name && (
+                  <span class="status">
+                    {collection.tags.map((t) => t.name).join(' + ')}
+                  </span>
+                )}
+                <span class="status">
+                  {!collection.hasNotes && !collection.name
+                    ? 'Name or Notes needed'
+                    : collection.publishedRevision === null
+                      ? 'Unpublished'
+                      : collection.publishedRevision === collection.revision
+                        ? 'Published'
+                        : 'Draft changes'}
+                </span>
+              </a>
+            </li>
+          ))}
+        </ul>
+        {!listing.items.length && <p>No saved combinations yet.</p>}
+        <nav aria-label="Collection pages">
+          {Astro.url.searchParams.has('after') && (
+            <a href="/dashboard/collections">First page</a>
+          )}
+          {listing.nextAfter && (
+            <a
+              href={`/dashboard/collections?after=${encodeURIComponent(listing.nextAfter)}`}
+            >
+              Next collections
+            </a>
+          )}
+        </nav>
+      </section>
+      <section class="panel" aria-labelledby="editor-heading">
+        <h2 id="editor-heading">
+          {id ? 'Edit collection Notes' : 'New collection'}
+        </h2>
+        <form method="post" action="/dashboard/collections">
+          <input type="hidden" name="collectionId" value={id} />
+          <input
+            type="hidden"
+            name="expectedRevision"
+            value={values.expectedRevision}
+          />
+          <label for="tagNames">Defining tags</label>
+          <textarea
+            id="tagNames"
+            name="tagNames"
+            rows="4"
+            required
+            readonly={Boolean(id)}
+            aria-describedby="tags-help"
+          >{values.tagNames}</textarea>
+          <p class="hint" id="tags-help">
+            {id
+              ? 'These tags define this collection. Start a new collection to use another combination.'
+              : 'Enter at least two existing tag names or aliases, one per line.'}{' '}
+            <a href="/dashboard/tags">Manage tags</a>
+          </p>
+          <label for="name">Name (optional)</label>
+          <input
+            id="name"
+            name="name"
+            value={values.name}
+            maxlength="120"
+            aria-describedby="name-help"
+          />
+          <p class="hint" id="name-help">
+            Only named collections can be featured or suggested. Unnamed
+            collections are found through their tag combination.
+          </p>
+          <label for="notes">Notes (optional)</label>
+          <textarea
+            id="notes"
+            name="notes"
+            rows="10"
+            maxlength="20000"
+            aria-describedby="notes-help"
+          >{values.notes}</textarea>
+          <p class="hint" id="notes-help">
+            A name or Notes establishes this collection. Clearing both keeps the
+            saved draft and cover privately.
+          </p>
+          <fieldset>
+            <legend>Featuring</legend>
+            <label class="choice">
+              <input
+                type="checkbox"
+                name="featured"
+                checked={values.featured === 'on'}
+              />
+              Feature this named collection
+            </label>
+            <label for="featuredOrder">Featured order</label>
+            <input
+              type="number"
+              id="featuredOrder"
+              name="featuredOrder"
+              value={values.featuredOrder}
+              min="0"
+              max="1000000"
+              step="1"
+            />
+            <p class="hint">
+              Lower numbers appear first. Used only for a named collection.
+            </p>
+          </fieldset>
+          <label for="coverPhotoId">Cover photograph</label>
+          <select
+            id="coverPhotoId"
+            name="coverPhotoId"
+            aria-describedby="cover-help"
+          >
+            <option value="" selected={!values.coverPhotoId}>
+              No cover selected
+            </option>
+            {values.coverPhotoId &&
+              !covers.some(
+                (photo) => photo.photoId === values.coverPhotoId,
+              ) && (
+                <option value={values.coverPhotoId} selected>
+                  Current cover (outside this page)
+                </option>
+              )}
+            {covers.map((photo) => (
+              <option
+                value={photo.photoId}
+                selected={photo.photoId === values.coverPhotoId}
+              >
+                {photo.title || 'Untitled photograph'} · Published{' '}
+                {new Date(photo.firstPublishedAt).toISOString().slice(0, 10)}
+              </option>
+            ))}
+          </select>
+          <p class="hint" id="cover-help">
+            Choose a published photograph with every defining tag.{' '}
+            {!id && 'Save the new collection first.'}
+          </p>
+          {(nextCover || Astro.url.searchParams.has('coverBefore')) && (
+            <nav aria-label="Cover pages">
+              <span class="hint">
+                Save changes before changing the cover page.
+              </span>
+              {Astro.url.searchParams.has('coverBefore') && (
+                <a
+                  href={`/dashboard/collections?edit=${encodeURIComponent(id)}`}
+                >
+                  Newest photographs
+                </a>
+              )}
+              {nextCover && (
+                <a
+                  href={`/dashboard/collections?edit=${encodeURIComponent(id)}&coverBefore=${encodeURIComponent(nextCover.photoId)}&coverTime=${nextCover.firstPublishedAt}`}
+                >
+                  Older photographs
+                </a>
+              )}
+            </nav>
+          )}
+          <button type="submit">Save collection draft</button>
+        </form>
+      </section>
+    </div>
+  )}
+</EditorLayout>

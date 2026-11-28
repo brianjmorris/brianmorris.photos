@@ -49,7 +49,6 @@ export default {
     }
     const tag = await repository.createTag({
       name: 'Worker collection',
-      slug: 'worker-collection',
       aliases: ['Worker alias'],
     });
     const photo = await repository.createPhoto([tag.tagId]);

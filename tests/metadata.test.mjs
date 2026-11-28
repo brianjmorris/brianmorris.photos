@@ -4,10 +4,144 @@ import { CatalogueRepository } from '../src/catalogue/repository.ts';
 import { SourceMetadataRepository } from '../src/catalogue/sources.ts';
 import { PlaceRepository } from '../src/catalogue/places.ts';
 import { normalizeCapture } from '../src/catalogue/metadata.ts';
+import { offsetsAtLocalTime } from '../src/photo-review/time-zone.ts';
+import { jpegDateTags } from '../src/photo-review/jpeg-date-tags.ts';
+import {
+  captureDatesDisagree,
+  embeddedDates,
+} from '../src/photo-review/embedded-dates.ts';
 import {
   applyLocalMigrations,
   createLocalCatalogue,
 } from './helpers/catalogue.mjs';
+
+it('compares capture dates across groups without flagging equivalent UTC or separate edit dates', () => {
+  const tags = {
+    'ExifIFD:DateTimeOriginal': '2024:07:01 23:50:10',
+    'ExifIFD:SubSecTimeOriginal': '040',
+    'ExifIFD:OffsetTimeOriginal': '-04:00',
+    'XMP-photoshop:DateCreated': '2024-07-02T03:50:10.04Z',
+    'IFD0:ModifyDate': '2025:12:20 15:00:00',
+  };
+  const result = embeddedDates(tags);
+  assert.deepEqual(
+    result.map((date) => date.purpose),
+    ['capture', 'capture', 'other'],
+  );
+  assert.equal(captureDatesDisagree(result), false);
+  assert.equal(
+    captureDatesDisagree(
+      embeddedDates({
+        ...tags,
+        'IPTC:DateCreated': '2019:11:23',
+        'IPTC:TimeCreated': '15:25:00-05:00',
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    captureDatesDisagree(
+      embeddedDates({
+        ...tags,
+        'XMP-photoshop:DateCreated': '2024-07-02T03:50:10.041Z',
+      }),
+    ),
+    true,
+  );
+});
+
+it('preserves date-only and unknown-offset metadata and exposes malformed values without selecting them', () => {
+  const dates = embeddedDates({
+    'ExifIFD:DateTimeOriginal': '2024:02:31 12:50:10',
+    'XMP-exif:DateTimeOriginal': '2024-02-29T13:00:00-00:00',
+    'XMP-photoshop:DateCreated': '2024-02-29T13:00:00+14:30',
+    'IPTC:DateCreated': '2024:02:29',
+  });
+  assert.equal(dates[0].value, null);
+  assert.match(dates[0].raw, /2024:02:31/);
+  assert.deepEqual(dates[1].value, {
+    date: '2024-02-29',
+    time: '13:00:00',
+    fraction: null,
+    offset: null,
+  });
+  assert.equal(dates[2].value, null);
+  assert.deepEqual(dates[3].value, {
+    date: '2024-02-29',
+    time: null,
+    fraction: null,
+    offset: null,
+  });
+  assert.equal(captureDatesDisagree(dates), false);
+});
+
+it('resolves historical named-zone offsets and distinguishes repeated and skipped camera times', () => {
+  assert.deepEqual(
+    offsetsAtLocalTime('2024-11-03', '01:30:00', 'America/Toronto'),
+    [-240, -300],
+  );
+  assert.deepEqual(
+    offsetsAtLocalTime('2024-03-10', '02:30:00', 'America/Toronto'),
+    [],
+  );
+  assert.deepEqual(
+    offsetsAtLocalTime('2024-07-01', '12:00:00', 'America/Toronto'),
+    [-240],
+  );
+  assert.deepEqual(
+    offsetsAtLocalTime('2024-01-01', '12:00:00', 'America/Toronto'),
+    [-300],
+  );
+  assert.deepEqual(
+    offsetsAtLocalTime('2024-07-01', '12:00:00', 'Asia/Kathmandu'),
+    [345],
+  );
+  assert.throws(
+    () => offsetsAtLocalTime('1900-07-01', '12:00:00', 'Asia/Kathmandu'),
+    /cannot be stored exactly/,
+  );
+});
+
+it('projects the saved capture to JPEG date fields even when the original capture value is unchanged', () => {
+  const capture = normalizeCapture({
+    precision: 'second',
+    localDate: '2024-07-01',
+    localTime: '23:50:10',
+    subseconds: '040',
+    offsetMinutes: -240,
+    offsetSource: 'Owner confirmed',
+  });
+  const fields = jpegDateTags(capture, { 'GPS:GPSDateStamp': '2012:01:01' });
+  for (const field of ['DateTimeOriginal', 'CreateDate', 'ModifyDate'])
+    assert.equal(fields[`EXIF:${field}`], '2024:07:01 23:50:10');
+  assert.equal(fields['EXIF:OffsetTimeDigitized'], '-04:00');
+  assert.equal(fields['EXIF:SubSecTime'], '040');
+  assert.equal(fields['IPTC:DigitalCreationTime'], '23:50:10-04:00');
+  assert.equal(fields['XMP-xmp:MetadataDate'], '2024:07:01 23:50:10.040-04:00');
+  assert.equal(fields['GPS:GPSDateStamp'], '2024:07:02');
+  assert.equal(fields['GPS:GPSTimeStamp'], '03:50:10.040');
+  assert.equal(fields['XMP-exif:GPSDateTime'], undefined);
+
+  const floating = jpegDateTags(
+    normalizeCapture({ ...capture, offsetMinutes: null, offsetSource: null }),
+    { 'GPS:GPSDateStamp': '2012:01:01' },
+  );
+  assert.equal(floating['EXIF:OffsetTimeOriginal'], '');
+  assert.equal(floating['IPTC:TimeCreated'], '');
+  assert.equal(floating['GPS:GPSDateStamp'], '');
+  assert.equal(
+    floating['XMP-exif:DateTimeOriginal'],
+    '2024:07:01 23:50:10.040',
+  );
+
+  const day = jpegDateTags(
+    normalizeCapture({ precision: 'date', localDate: '2024-07-01' }),
+    {},
+  );
+  assert.equal(day['EXIF:DateTimeOriginal'], '');
+  assert.equal(day['IPTC:DateCreated'], '2024:07:01');
+  assert.equal(day['XMP-photoshop:DateCreated'], '2024:07:01');
+});
 
 describe('metadata, evidence, and places on local D1', () => {
   let local, db, catalogue, sources, places;
@@ -90,6 +224,109 @@ describe('metadata, evidence, and places on local D1', () => {
     assert.equal(result.published.publicLocation.visibility, 'place');
     assert(!JSON.stringify(result).includes('worker-private-marker'));
     assert(!JSON.stringify(result).includes('sourceId'));
+  });
+
+  it('saves curated capture separately from original EXIF while preserving other draft details', async () => {
+    const tag = await catalogue.createTag({ name: 'Capture fixture' });
+    const place = await places.create(placeInput());
+    const photo = await catalogue.createPhoto([tag.tagId]);
+    const initial = await catalogue.savePhotoMetadataDraft(
+      photo.photoId,
+      photo.revision,
+      metadataInput(null, place),
+    );
+    const evidence = evidenceInput();
+    const saved = await catalogue.savePhotoCaptureDraft(
+      photo.photoId,
+      initial.revision,
+      {
+        precision: 'second',
+        localDate: '2024-11-03',
+        localTime: '01:35:27',
+        subseconds: '040',
+        offsetMinutes: -300,
+      },
+      evidence,
+    );
+    assert.equal(saved.capture.utcInstant, '2024-11-03T06:35:27.040Z');
+    assert.equal(saved.capture.offsetSource, 'Owner confirmed');
+    assert.deepEqual(saved.original, {
+      dateTime: evidence.captureText,
+      subseconds: evidence.captureSubseconds,
+      offset: evidence.captureOffsetText,
+    });
+    assert.deepEqual(
+      await catalogue.getPhotoCaptureDraft(photo.photoId),
+      saved,
+    );
+    const persisted = await catalogue.getPhotoDraft(photo.photoId);
+    assert.deepEqual(persisted.tagIds, initial.tagIds);
+    const { capture: _capture, sourceId, ...other } = persisted.metadata;
+    const {
+      capture: _previous,
+      sourceId: _previousSource,
+      ...initialOther
+    } = initial.metadata;
+    assert.deepEqual(other, initialOther);
+    assert.deepEqual(
+      (await sources.get(sourceId)).rawMetadata,
+      evidence.rawMetadata,
+    );
+
+    await assert.rejects(
+      catalogue.savePhotoCaptureDraft(
+        photo.photoId,
+        saved.revision,
+        { precision: 'unknown' },
+        { ...evidence, sha256: 'b'.repeat(64) },
+      ),
+      errorCode('invalid_input'),
+    );
+    const dateOnly = await catalogue.savePhotoCaptureDraft(
+      photo.photoId,
+      saved.revision,
+      { precision: 'date', localDate: '2024-11-03' },
+    );
+    assert.equal(dateOnly.capture.localTime, null);
+    assert.equal(dateOnly.capture.utcInstant, null);
+    assert.deepEqual(dateOnly.original, saved.original);
+    assert.equal(
+      (await catalogue.getPhotoDraft(photo.photoId)).metadata.sourceId,
+      sourceId,
+    );
+  });
+
+  it('rolls back captured EXIF when a competing edit wins after the draft is read', async () => {
+    const photo = await catalogue.createPhoto();
+    const stale = new CatalogueRepository({
+      prepare: (sql) => db.prepare(sql),
+      batch: async (statements) => {
+        await catalogue.savePhotoMetadataDraft(photo.photoId, photo.revision, {
+          title: 'Concurrent title',
+        });
+        return db.batch(statements);
+      },
+    });
+    await assert.rejects(
+      stale.savePhotoCaptureDraft(
+        photo.photoId,
+        photo.revision,
+        { precision: 'date', localDate: '2024-11-03' },
+        evidenceInput(),
+      ),
+      errorCode('conflict'),
+    );
+    assert.equal(
+      (await catalogue.getPhotoDraft(photo.photoId)).metadata.title,
+      'Concurrent title',
+    );
+    assert.equal(
+      await statement(
+        'SELECT id FROM photo_source_metadata WHERE photo_id = ?',
+        photo.photoId,
+      ).first(),
+      null,
+    );
   });
 
   it('upgrades a populated first-migration catalogue without changing its records', async () => {
@@ -247,10 +484,7 @@ describe('metadata, evidence, and places on local D1', () => {
     assert.deepEqual(saved.metadata.keywords, ['boats', 'été']);
     assert.equal(saved.metadata.title, input.title);
     assert.equal(saved.metadata.caption, input.caption);
-    assert.equal(
-      (await catalogue.getPhotoRevision(photo.photoId, 1)).metadata,
-      null,
-    );
+    assert.equal(await catalogue.getPhotoRevision(photo.photoId, 1), null);
     assert.equal(
       (await sources.get(source.id)).captureText,
       '2024:11:03 01:30:00',
@@ -260,7 +494,6 @@ describe('metadata, evidence, and places on local D1', () => {
   it('retains metadata on tag-only edits and retains tags on metadata-only edits', async () => {
     const tag = await catalogue.createTag({
       name: 'Metadata boats',
-      slug: 'metadata-boats',
     });
     const photo = await catalogue.createPhoto([tag.tagId]);
     const saved = await catalogue.savePhotoMetadataDraft(photo.photoId, 1, {
@@ -279,10 +512,7 @@ describe('metadata, evidence, and places on local D1', () => {
     );
     assert.equal(cleared.metadata.title, null);
     assert.deepEqual(cleared.metadata.rights.creators, []);
-    assert.equal(
-      (await catalogue.getPhotoRevision(photo.photoId, 2)).metadata.title,
-      'Keep me',
-    );
+    assert.equal(await catalogue.getPhotoRevision(photo.photoId, 2), null);
   });
 
   it('preserves unknown, date-only, and offset-free capture uncertainty', () => {
@@ -511,14 +741,14 @@ describe('metadata, evidence, and places on local D1', () => {
     assert.equal(await catalogue.getPhotoRevision(second.photoId, 2), null);
     assert.equal(
       await statement(
-        'SELECT * FROM photo_metadata_revisions WHERE photo_id = ?',
+        'SELECT * FROM photo_metadata_states WHERE photo_id = ?',
         second.photoId,
       ).first(),
       null,
     );
   });
 
-  it('rejects stale and competing metadata saves and seals metadata snapshots', async () => {
+  it('rejects stale and competing metadata saves and unversioned SQL edits', async () => {
     const photo = await catalogue.createPhoto();
     const results = await Promise.allSettled([
       catalogue.savePhotoMetadataDraft(photo.photoId, 1, {
@@ -545,24 +775,24 @@ describe('metadata, evidence, and places on local D1', () => {
     );
     await assert.rejects(
       statement(
-        'UPDATE photo_metadata_revisions SET title = ? WHERE photo_id = ?',
+        'UPDATE photo_metadata_drafts SET title = ? WHERE photo_id = ?',
         'Mutation',
         photo.photoId,
       ).run(),
     );
     await assert.rejects(
       statement(
-        'DELETE FROM photo_metadata_revisions WHERE photo_id = ?',
+        'DELETE FROM photo_metadata_drafts WHERE photo_id = ?',
         photo.photoId,
       ).run(),
     );
     await assert.rejects(
       statement(
-        `INSERT INTO photo_metadata_revisions SELECT photo_id, 1, source_id,
+        `INSERT INTO photo_metadata_states SELECT photo_id, 1, source_id,
       title, caption, alt_text, keywords_json, creators_json, copyright_owners_json, copyright_notice, credit_line, usage_terms, rights_url, public_contact_url,
       capture_precision, capture_date, capture_time, capture_subseconds, offset_minutes, time_zone, offset_source, capture_utc, clock_correction_seconds, correction_reason,
       private_place_id, private_place_revision, private_latitude, private_longitude, public_visibility, public_place_id, public_place_revision, public_latitude, public_longitude, public_radius_meters
-      FROM photo_metadata_revisions WHERE photo_id = ? AND photo_revision = 2`,
+      FROM photo_metadata_states WHERE photo_id = ? AND photo_revision = 2`,
         photo.photoId,
       ).run(),
     );
@@ -603,7 +833,7 @@ describe('metadata, evidence, and places on local D1', () => {
     );
   });
 
-  it('pins parent revisions and preserves published location references through place renames', async () => {
+  it('freezes selected places and ancestry while newer place drafts replace old versions', async () => {
     const parent = await places.create({
       name: 'Original region',
       kind: 'region',
@@ -628,10 +858,12 @@ describe('metadata, evidence, and places on local D1', () => {
       1,
       placeInput('Draft city name', { placeId: parent.placeId, revision: 2 }),
     );
-    assert.equal((await places.getRevision(ref(city))).name, 'Original city');
-    assert.equal(
-      (await places.ancestors(ref(city)))[0].name,
-      'Original region',
+    assert.equal(await places.getRevision(ref(city)), null);
+    assert.deepEqual(
+      (await catalogue.getPublishedPhotoPlace(photo.photoId)).map(
+        (p) => p.name,
+      ),
+      ['Original city', 'Original region'],
     );
     assert.deepEqual(
       (await catalogue.getPublishedPhotoMetadata(photo.photoId)).publicLocation
@@ -696,7 +928,7 @@ describe('metadata, evidence, and places on local D1', () => {
     assert.equal((await places.getDraft(root.placeId)).revision, 1);
   });
 
-  it('rejects competing place edits and direct mutations of snapshots or aliases', async () => {
+  it('rejects competing place edits and retains only the winning draft and aliases', async () => {
     const place = await places.create({
       ...placeInput('Concurrent place'),
       aliases: ['Old alias'],
@@ -722,32 +954,34 @@ describe('metadata, evidence, and places on local D1', () => {
       ).length,
       1,
     );
-    for (const sql of [
-      'UPDATE place_revisions SET name = ? WHERE place_id = ?',
-      'UPDATE place_aliases SET alias = ? WHERE place_id = ?',
-    ])
+    for (const sql of ['UPDATE place_drafts SET name = ? WHERE place_id = ?'])
       await assert.rejects(statement(sql, 'mutation', place.placeId).run());
     await assert.rejects(
       statement(
-        'DELETE FROM place_revisions WHERE place_id = ?',
+        'DELETE FROM place_drafts WHERE place_id = ?',
         place.placeId,
       ).run(),
     );
     await assert.rejects(
       statement(
-        'DELETE FROM place_aliases WHERE place_id = ?',
-        place.placeId,
-      ).run(),
-    );
-    await assert.rejects(
-      statement(
-        'INSERT INTO place_aliases VALUES (?, 1, ?, ?)',
+        'INSERT INTO place_draft_aliases VALUES (?, 1, ?, ?)',
         place.placeId,
         'Late alias',
         'late alias',
       ).run(),
     );
-    assert.deepEqual(await places.getRevision(ref(place)), place);
+    assert.equal(await places.getRevision(ref(place)), null);
+    const winner = results.find((r) => r.status === 'fulfilled').value;
+    assert.deepEqual(await places.getDraft(place.placeId), winner);
+    assert.equal(
+      (
+        await statement(
+          'SELECT COUNT(*) AS n FROM place_draft_aliases WHERE place_id=?',
+          place.placeId,
+        ).first()
+      ).n,
+      1,
+    );
   });
 
   it('validates rights URLs, place types, bounds and required provenance', async () => {
@@ -799,12 +1033,12 @@ describe('metadata, evidence, and places on local D1', () => {
   it('uses indexed public metadata and bounded parent lookup plans', async () => {
     const plans = [
       await statement(
-        `EXPLAIN QUERY PLAN SELECT m.title FROM published_photos p JOIN photo_metadata_revisions m
+        `EXPLAIN QUERY PLAN SELECT m.title FROM published_photos p JOIN photo_metadata_public m
         ON m.photo_id = p.photo_id AND m.photo_revision = p.photo_revision WHERE p.photo_id = ?`,
         'photo',
       ).all(),
       await statement(
-        'EXPLAIN QUERY PLAN SELECT name FROM place_revisions WHERE place_id = ? AND revision = ?',
+        'EXPLAIN QUERY PLAN SELECT name FROM place_drafts WHERE place_id = ? AND revision = ?',
         'place',
         1,
       ).all(),

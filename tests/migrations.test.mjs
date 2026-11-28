@@ -2,404 +2,510 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import { CatalogueRepository } from '../src/catalogue/repository.ts';
+import { CollectionRepository } from '../src/catalogue/collections.ts';
 import { PlaceRepository } from '../src/catalogue/places.ts';
+import { SourceMetadataRepository } from '../src/catalogue/sources.ts';
+import { searchDraftTags } from '../src/catalogue/tag-search.ts';
 import {
   applyLocalMigrations,
   createLocalCatalogue,
 } from './helpers/catalogue.mjs';
+import { seedLegacyCatalogue } from './helpers/legacy-catalogue.mjs';
 
-async function withCatalogue(operation, through) {
+const upgrade = '0006_current_editorial_state.sql';
+const statement = (db, sql, ...values) => db.prepare(sql).bind(...values);
+async function withLegacy(operation) {
   const local = await createLocalCatalogue();
   try {
-    await applyLocalMigrations(local.db, through);
-    const catalogue = new CatalogueRepository(local.db);
-    const places = new PlaceRepository(local.db);
-    await operation({ db: local.db, catalogue, places });
+    await applyLocalMigrations(local.db, '0005_distinct_collections.sql');
+    const source = await seedLegacyCatalogue(local.db);
+    await operation(local.db, source);
   } finally {
     await local.close();
   }
 }
-
-async function extendSchema(db) {
-  const sql = await readFile(
-    new URL('./fixtures/catalogue-extension.sql', import.meta.url),
-    'utf8',
+async function integrity(db) {
+  assert.deepEqual(
+    (await db.prepare('PRAGMA foreign_key_check').all()).results,
+    [],
   );
-  await db.batch(
-    sql
-      .split('-- statement')
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .map((part) => db.prepare(part)),
+  assert.equal(
+    Object.values(await db.prepare('PRAGMA quick_check').first())[0],
+    'ok',
   );
 }
-
-async function seed(catalogue, places, db) {
-  const tag = await catalogue.createTag({
-    name: 'Migration boats',
-    slug: 'migration-boats',
-    aliases: ['Migration vessel'],
-  });
-  const photo = await catalogue.createPhoto([tag.tagId]);
-  const place = await places.create({
-    name: 'Migration harbour',
-    kind: 'site',
-    aliases: ['Migration port'],
-    provenance: { kind: 'manual' },
-  });
-  const revision = await catalogue.savePhotoMetadataDraft(photo.photoId, 1, {
-    title: 'Existing title',
-    rights: { creators: ['Élodie'] },
-    publicLocation: {
-      visibility: 'place',
-      place: { placeId: place.placeId, revision: 1 },
-    },
-  });
-  await db.batch([
-    db
-      .prepare(
-        'INSERT INTO published_tags (tag_id, tag_revision) VALUES (?, ?)',
-      )
-      .bind(tag.tagId, 1),
-    db
-      .prepare(
-        'INSERT INTO published_photos (photo_id, photo_revision, first_published_at) VALUES (?, ?, ?)',
-      )
-      .bind(photo.photoId, 2, 1000),
-    db
-      .prepare(
-        'INSERT INTO published_photo_tags (photo_id, photo_revision, tag_id, first_published_at) VALUES (?, ?, ?, ?)',
-      )
-      .bind(photo.photoId, 2, tag.tagId, 1000),
-  ]);
-  return {
-    tag,
-    photo: revision,
-    place,
-    published: await catalogue.getPublishedPhotoMetadata(photo.photoId),
-  };
-}
-
-describe('catalogue migration compatibility', () => {
-  it('upgrades populated tables with optional columns and retains authoring and public snapshots', async () => {
-    await withCatalogue(async ({ db, catalogue, places }) => {
-      const before = await seed(catalogue, places, db);
-      await extendSchema(db);
-      // The application migration must also work with an extended ledger table.
+describe('current-state migration on populated D1', () => {
+  it('preserves current and published content, source evidence, namespaces and dependent relationships', async () => {
+    await withLegacy(async (db, source) => {
+      await applyLocalMigrations(db, upgrade);
       await applyLocalMigrations(db);
-      const nextTag = await catalogue.saveTagDraft(before.tag.tagId, 1, {
-        name: 'Renamed migration boats',
-        slug: 'renamed-migration-boats',
-        aliases: ['Renamed migration vessel'],
-      });
-      const nextPhoto = await catalogue.savePhotoDraft(
-        before.photo.photoId,
-        2,
-        [],
-      );
-      const nextPlace = await places.saveDraft(before.place.placeId, 1, {
-        name: 'Renamed harbour',
-        kind: 'site',
-        aliases: ['Renamed port'],
-        provenance: { kind: 'manual' },
-      });
-      assert.equal(nextTag.revision, 2);
-      assert.deepEqual(nextPhoto.metadata, before.photo.metadata);
-      assert.deepEqual(nextPlace.aliases, ['Renamed port']);
+      const photos = new CatalogueRepository(db),
+        collections = new CollectionRepository(db),
+        places = new PlaceRepository(db);
       assert.equal(
-        (await catalogue.findDraftTag('RENAMED MIGRATION VESSEL')).tagId,
-        before.tag.tagId,
+        (await photos.getPhotoDraft('legacy-photo')).metadata.title,
+        'Draft title',
       );
-      assert.deepEqual(
-        await catalogue.getTagRevision(before.tag.tagId, 1),
-        before.tag,
-      );
-      assert.deepEqual(
-        await catalogue.getPhotoRevision(before.photo.photoId, 2),
-        before.photo,
-      );
-      assert.deepEqual(
-        await places.getRevision({
-          placeId: before.place.placeId,
-          revision: 1,
-        }),
-        before.place,
-      );
-      assert.deepEqual(
-        await catalogue.getPublishedPhotoMetadata(before.photo.photoId),
-        before.published,
+      const { items } = await photos.listPhotoDrafts(undefined, 1, [
+        'legacy-photo',
+      ]);
+      assert.equal(items[0].attachment, 'none');
+      assert.equal(
+        (await photos.getPublishedPhotoMetadata('legacy-photo')).title,
+        'Published title',
       );
       assert.equal(
-        (await catalogue.listPublishedTagPhotos(before.tag.tagId))[0]
-          .firstPublishedAt,
-        1000,
+        (await photos.getPublishedTag('legacy-tag-a')).name,
+        'Published legacy-tag-a',
       );
-      const freshTag = await catalogue.createTag({
-        name: 'Fresh extended tag',
-        slug: 'fresh-extended-tag',
-        aliases: ['Fresh extended alias'],
-      });
-      await catalogue.createPhoto([freshTag.tagId]);
-      await places.create({
-        name: 'Fresh extended place',
-        kind: 'site',
-        aliases: ['Fresh place alias'],
-        provenance: { kind: 'manual' },
-      });
-      await assert.rejects(
-        catalogue.saveTagDraft(before.tag.tagId, 2, {
-          name: freshTag.name,
-          slug: 'collision-after-extension',
-        }),
-        (error) => error.code === 'conflict',
-      );
-      assert.deepEqual(await catalogue.getTagDraft(before.tag.tagId), nextTag);
       assert.equal(
-        (await catalogue.findDraftTag('RENAMED MIGRATION VESSEL')).tagId,
-        before.tag.tagId,
+        (await photos.getTagDraft('legacy-tag-a')).notes,
+        'Draft tag notes',
       );
-      assert.equal(await catalogue.getTagRevision(before.tag.tagId, 3), null);
+      assert.equal(
+        (await collections.getDraft('legacy-collection')).name,
+        'Draft collection',
+      );
+      assert.equal(
+        (await collections.getPublished('legacy-collection')).name,
+        'Published collection',
+      );
+      assert.equal((await places.getDraft('legacy-city')).name, 'Draft city');
+      assert.deepEqual(
+        (await places.ancestors({ placeId: 'legacy-city', revision: 3 })).map(
+          (p) => p.name,
+        ),
+        ['Draft region'],
+      );
+      assert.deepEqual(
+        (await photos.getPublishedPhotoPlace('legacy-photo')).map(
+          (p) => p.name,
+        ),
+        ['Published city', 'Published region'],
+      );
+      assert.deepEqual(
+        await new SourceMetadataRepository(db).get(source.id),
+        source,
+      );
+      assert.equal(
+        (await photos.findDraftTag('DRAFT LEGACY-TAG-A ALIAS')).tagId,
+        'legacy-tag-a',
+      );
+      assert.equal(
+        (await searchDraftTags(db, 'draft legacy-tag-a alias', []))[0].tagId,
+        'legacy-tag-a',
+      );
+      assert(
+        !(
+          await db.prepare("PRAGMA table_info('tag_drafts')").all()
+        ).results.some((column) => column.name === 'slug'),
+      );
+      const pairs = await db
+        .prepare(
+          'SELECT tag_id, related_id, photo_count FROM tag_cooccurrences ORDER BY tag_id, related_id',
+        )
+        .all();
+      const expectedPairs = await db
+        .prepare(
+          `SELECT a.tag_id, b.tag_id AS related_id, count(*) AS photo_count
+        FROM photo_draft_tags a JOIN photo_draft_tags b ON a.photo_id=b.photo_id AND a.tag_id<>b.tag_id
+        GROUP BY a.tag_id, b.tag_id ORDER BY a.tag_id, b.tag_id`,
+        )
+        .all();
+      assert.deepEqual(pairs.results, expectedPairs.results);
+      assert.deepEqual(
+        (await db.prepare('SELECT * FROM migration_test_links').all()).results,
+        [{ photo_id: 'legacy-photo', tag_id: 'legacy-tag-a' }],
+      );
+      assert.equal(
+        (await db.prepare('SELECT COUNT(*) AS n FROM tag_slugs').first()).n,
+        6,
+      );
       assert.equal(
         (
           await db
-            .prepare('SELECT COUNT(*) AS count FROM catalogue_test_migrations')
+            .prepare('SELECT COUNT(*) AS n FROM catalogue_test_migrations')
             .first()
-        ).count,
-        3,
+        ).n,
+        11,
       );
-      assert.deepEqual(
-        (await db.prepare('PRAGMA foreign_key_check').all()).results,
-        [],
-      );
-    }, '0002_metadata_places.sql');
+      await integrity(db);
+    });
   });
 
-  it('adds a relationship using existing stable IDs without changing old revisions', async () => {
-    await withCatalogue(async ({ db, catalogue, places }) => {
-      const before = await seed(catalogue, places, db);
-      const related = await catalogue.createPhoto();
-      await extendSchema(db);
-      await db
-        .prepare(
-          'INSERT INTO migration_test_photo_links (photo_id, related_photo_id) VALUES (?, ?)',
-        )
-        .bind(before.photo.photoId, related.photoId)
-        .run();
-      await catalogue.savePhotoDraft(before.photo.photoId, 2, []);
+  it('removes discarded history and keeps storage bounded across repeated saves and publications', async () => {
+    await withLegacy(async (db) => {
+      await applyLocalMigrations(db);
+      const photos = new CatalogueRepository(db),
+        collections = new CollectionRepository(db),
+        places = new PlaceRepository(db);
+      assert.equal(await photos.getPhotoRevision('legacy-photo', 2), null);
+      assert.equal(await photos.getTagRevision('legacy-tag-a', 2), null);
+      assert.equal(await collections.getRevision('legacy-collection', 2), null);
+      assert.equal(
+        await places.getRevision({ placeId: 'legacy-city', revision: 1 }),
+        null,
+      );
       assert.deepEqual(
         (
           await db
             .prepare(
-              'SELECT photo_id, related_photo_id FROM migration_test_photo_links',
+              "SELECT name FROM sqlite_master WHERE name LIKE '%_revisions'",
             )
             .all()
         ).results,
-        [{ photo_id: before.photo.photoId, related_photo_id: related.photoId }],
-      );
-      assert.deepEqual(
-        await catalogue.getPhotoRevision(before.photo.photoId, 2),
-        before.photo,
-      );
-      assert.deepEqual(
-        await catalogue.getPublishedPhotoMetadata(before.photo.photoId),
-        before.published,
-      );
-      await assert.rejects(
-        db
-          .prepare(
-            'INSERT INTO migration_test_photo_links (photo_id, related_photo_id) VALUES (?, ?)',
-          )
-          .bind(before.photo.photoId, 'missing-photo')
-          .run(),
-      );
-      assert.deepEqual(
-        (await db.prepare('PRAGMA foreign_key_check').all()).results,
         [],
       );
-    });
-  });
-
-  it('backfills a new column transactionally and restores revision immutability', async () => {
-    await withCatalogue(async ({ db, catalogue, places }) => {
-      const before = await seed(catalogue, places, db);
-      await extendSchema(db);
-      const trigger = await db
-        .prepare(
-          "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'photo_revision_immutable_update'",
-        )
-        .first();
+      for (let version = 3; version < 8; version++) {
+        const photo = await photos.savePhotoMetadataDraft(
+          'legacy-photo',
+          version,
+          {
+            ...(await photos.getPhotoDraft('legacy-photo')).metadata,
+            title: `Edit ${version}`,
+          },
+        );
+        await photos.saveTagDraft('legacy-tag-a', version, {
+          name: `Tag edit ${version}`,
+          aliases: [`Alias edit ${version}`],
+        });
+        const collection = await collections.getDraft('legacy-collection');
+        await collections.saveDraft(collection.collectionId, version, {
+          ...collection,
+          notes: `Notes ${version}`,
+        });
+        const place = await places.getDraft('legacy-city');
+        await places.saveDraft(place.placeId, version, {
+          ...place,
+          name: `City edit ${version}`,
+        });
+        assert.equal(photo.revision, version + 1);
+      }
+      for (const [table, n] of [
+        ['photo_drafts', 1],
+        ['photo_public', 1],
+        ['photo_metadata_drafts', 1],
+        ['photo_metadata_public', 1],
+        ['tag_drafts', 2],
+        ['tag_public', 2],
+        ['collection_drafts', 1],
+        ['collection_public', 1],
+        ['place_drafts', 2],
+      ])
+        assert.equal(
+          (await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first()).n,
+          n,
+          table,
+        );
+      // Publishing replaces the single snapshot without changing first-publication order.
       await db.batch([
-        db.prepare('DROP TRIGGER photo_revision_immutable_update'),
-        db
-          .prepare(
-            'UPDATE photo_revisions SET editorial_label = ? WHERE photo_id = ? AND revision = ? AND editorial_label IS NULL',
-          )
-          .bind('Backfilled label', before.photo.photoId, 2),
-        db.prepare(trigger.sql),
+        db.prepare(
+          "DELETE FROM published_photo_tags WHERE photo_id='legacy-photo'",
+        ),
+        db.prepare(
+          "UPDATE published_photos SET photo_revision=8 WHERE photo_id='legacy-photo'",
+        ),
+        db.prepare(
+          "INSERT INTO published_photo_tags (photo_id,photo_revision,tag_id,first_published_at) SELECT photo_id,photo_revision,tag_id,1000 FROM photo_public_all_tags WHERE photo_id='legacy-photo'",
+        ),
+        db.prepare(
+          "UPDATE published_tags SET tag_revision=8 WHERE tag_id='legacy-tag-a'",
+        ),
+        db.prepare(
+          "UPDATE published_collections SET collection_revision=8 WHERE collection_id='legacy-collection'",
+        ),
       ]);
+      assert.equal(await photos.getPhotoRevision('legacy-photo', 1), null);
+      assert.equal(await photos.getTagRevision('legacy-tag-a', 1), null);
+      assert.equal(await collections.getRevision('legacy-collection', 1), null);
       assert.equal(
-        (
-          await db
-            .prepare(
-              'SELECT editorial_label FROM photo_revisions WHERE photo_id = ? AND revision = 2',
-            )
-            .bind(before.photo.photoId)
-            .first()
-        ).editorial_label,
-        'Backfilled label',
+        (await photos.getPublishedPhotoMetadata('legacy-photo')).title,
+        'Edit 7',
       );
-      assert.deepEqual(
-        await catalogue.getPhotoRevision(before.photo.photoId, 2),
-        before.photo,
+      assert.equal(
+        (await photos.listPublishedTagPhotos('legacy-tag-a'))[0]
+          .firstPublishedAt,
+        1000,
       );
-      assert.deepEqual(
-        await catalogue.getPublishedPhotoMetadata(before.photo.photoId),
-        before.published,
+      assert.equal(
+        (await db.prepare('SELECT COUNT(*) AS n FROM photo_public').first()).n,
+        1,
       );
-      await assert.rejects(
-        db
-          .prepare(
-            'UPDATE photo_revisions SET created_at = 1 WHERE photo_id = ?',
-          )
-          .bind(before.photo.photoId)
-          .run(),
-      );
-      await assert.rejects(
-        db
-          .prepare(
-            'UPDATE photo_revisions SET editorial_label = ? WHERE photo_id = ?',
-          )
-          .bind('Later mutation', before.photo.photoId)
-          .run(),
-      );
-      assert.deepEqual(
-        (await db.prepare('PRAGMA foreign_key_check').all()).results,
-        [],
-      );
+      await integrity(db);
     });
   });
 
-  it('rolls back a failed backfill, its DDL and ledger entry, including the immutable trigger', async () => {
-    await withCatalogue(async ({ db, catalogue, places }) => {
-      const before = await seed(catalogue, places, db);
-      await extendSchema(db);
-      const trigger = await db
-        .prepare(
-          "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'photo_revision_immutable_update'",
-        )
-        .first();
+  it('rolls back the table rebuild, dropped history and ledger when a later statement fails', async () => {
+    await withLegacy(async (db) => {
+      const sql = await readFile(
+        new URL(`../migrations/${upgrade}`, import.meta.url),
+        'utf8',
+      );
+      const before = (
+        await db
+          .prepare(
+            "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
+          )
+          .all()
+      ).results;
+      const sources = (
+        await db.prepare('SELECT * FROM photo_source_metadata').all()
+      ).results;
       await assert.rejects(
         db.batch([
-          db.prepare('DROP TRIGGER photo_revision_immutable_update'),
-          db
-            .prepare(
-              'UPDATE photo_revisions SET editorial_label = ? WHERE photo_id = ?',
-            )
-            .bind('Uncommitted label', before.photo.photoId),
-          db.prepare(
-            'CREATE INDEX failed_backfill_index ON photo_revisions(editorial_label)',
+          ...sql
+            .split('-- statement')
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((s) => db.prepare(s)),
+          statement(
+            db,
+            'INSERT INTO catalogue_test_migrations (name,sha256) VALUES (?,?)',
+            upgrade,
+            'failure',
           ),
-          db
-            .prepare(
-              'INSERT INTO catalogue_test_migrations (name, sha256) VALUES (?, ?)',
-            )
-            .bind('failed-backfill', 'test-only'),
-          db.prepare('INSERT INTO missing_backfill_target (id) VALUES (1)'),
+          db.prepare('INSERT INTO nonexistent_migration_table (id) VALUES (1)'),
         ]),
       );
-      assert.equal(
+      assert.deepEqual(
         (
           await db
             .prepare(
-              'SELECT editorial_label FROM photo_revisions WHERE photo_id = ? AND revision = 2',
+              "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
             )
-            .bind(before.photo.photoId)
-            .first()
-        ).editorial_label,
-        null,
-      );
-      assert.deepEqual(
-        await db
-          .prepare(
-            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'photo_revision_immutable_update'",
-          )
-          .first(),
-        trigger,
+            .all()
+        ).results,
+        before,
       );
       assert.equal(
-        await db
-          .prepare(
-            "SELECT name FROM sqlite_master WHERE name = 'failed_backfill_index'",
-          )
-          .first(),
-        null,
+        (await db.prepare('SELECT COUNT(*) AS n FROM photo_revisions').first())
+          .n,
+        3,
       );
       assert.equal(
-        await db
-          .prepare(
-            "SELECT name FROM catalogue_test_migrations WHERE name = 'failed-backfill'",
-          )
-          .first(),
+        await statement(
+          db,
+          'SELECT name FROM catalogue_test_migrations WHERE name=?',
+          upgrade,
+        ).first(),
         null,
       );
-      await assert.rejects(
-        db
-          .prepare(
-            'UPDATE photo_revisions SET created_at = 1 WHERE photo_id = ?',
-          )
-          .bind(before.photo.photoId)
-          .run(),
-      );
       assert.deepEqual(
-        await catalogue.getPhotoRevision(before.photo.photoId, 2),
-        before.photo,
+        (await db.prepare('SELECT * FROM photo_source_metadata').all()).results,
+        sources,
       );
-      assert.deepEqual(
-        await catalogue.getPublishedPhotoMetadata(before.photo.photoId),
-        before.published,
-      );
+      await integrity(db);
+      await applyLocalMigrations(db);
+      await integrity(db);
     });
   });
 
-  it('rejects an applied migration hash mismatch before applying later migrations', async () => {
-    await withCatalogue(async ({ db }) => {
-      const old = await db
-        .prepare('SELECT sha256 FROM catalogue_test_migrations WHERE name = ?')
-        .bind('0001_catalogue.sql')
+  it('keeps publication retries idempotent after newer drafts and rejects discarded targets', async () => {
+    await withLegacy(async (db) => {
+      await applyLocalMigrations(db);
+      const photos = new CatalogueRepository(db),
+        collections = new CollectionRepository(db);
+      const before = await photos.getPublishedPhotoMetadata('legacy-photo');
+      const tag = await photos.getPublishedTag('legacy-tag-a');
+      const collection = await collections.getPublished('legacy-collection');
+      await db.batch([
+        db.prepare(
+          "UPDATE published_photos SET photo_revision=1 WHERE photo_id='legacy-photo'",
+        ),
+        db.prepare(
+          "UPDATE published_tags SET tag_revision=1 WHERE tag_id='legacy-tag-a'",
+        ),
+        db.prepare(
+          "UPDATE published_collections SET collection_revision=1 WHERE collection_id='legacy-collection'",
+        ),
+        db.prepare(
+          "INSERT INTO published_tags (tag_id,tag_revision) VALUES ('legacy-tag-a',1) ON CONFLICT DO NOTHING",
+        ),
+      ]);
+      assert.deepEqual(
+        await photos.getPublishedPhotoMetadata('legacy-photo'),
+        before,
+      );
+      assert.deepEqual(await photos.getPublishedTag('legacy-tag-a'), tag);
+      assert.deepEqual(
+        await collections.getPublished('legacy-collection'),
+        collection,
+      );
+      for (const [table, column, id] of [
+        ['published_photos', 'photo', 'legacy-photo'],
+        ['published_tags', 'tag', 'legacy-tag-a'],
+        ['published_collections', 'collection', 'legacy-collection'],
+      ])
+        await assert.rejects(
+          statement(
+            db,
+            `UPDATE ${table} SET ${column}_revision=2 WHERE ${column}_id=?`,
+            id,
+          ).run(),
+          /catalogue_revision_conflict/,
+        );
+      await integrity(db);
+    });
+  });
+
+  it('retains frozen locations through unrelated edits and exposes only approved public descriptions', async () => {
+    await withLegacy(async (db) => {
+      await applyLocalMigrations(db);
+      const photos = new CatalogueRepository(db),
+        places = new PlaceRepository(db);
+      const draft = await photos.getPhotoDraft('legacy-photo');
+      const privateBefore = await photos.getPhotoDraftPlace(
+        'legacy-photo',
+        'private',
+      );
+      const publicBefore = await photos.getPublishedPhotoPlace('legacy-photo');
+      assert.deepEqual(
+        privateBefore.map((p) => p.name),
+        ['Draft city', 'Draft region'],
+      );
+      assert.deepEqual(privateBefore[1].aliases, ['Draft region alias']);
+      await places.saveDraft('legacy-city', 3, {
+        name: 'New city draft',
+        kind: 'city',
+        parent: { placeId: 'legacy-region', revision: 3 },
+        provenance: { kind: 'manual' },
+      });
+      await photos.savePhotoMetadataDraft('legacy-photo', 3, {
+        ...draft.metadata,
+        title: 'Unrelated title edit',
+      });
+      await photos.addTagsToPhotoDrafts(
+        [{ photoId: 'legacy-photo', expectedRevision: 4 }],
+        ['legacy-tag-a'],
+      );
+      assert.deepEqual(
+        await photos.getPhotoDraftPlace('legacy-photo', 'private'),
+        privateBefore,
+      );
+      assert.deepEqual(
+        await photos.getPublishedPhotoPlace('legacy-photo'),
+        publicBefore,
+      );
+      const output = JSON.stringify(publicBefore);
+      for (const secret of [
+        'private',
+        'provenance',
+        'providerId',
+        'source-private-marker',
+        'latitude',
+        'longitude',
+      ])
+        assert(!output.includes(secret));
+      assert.deepEqual(
+        await photos.getPublishedPhotoPlace('missing-photo'),
+        [],
+      );
+      await db.batch([
+        db.prepare(
+          "DELETE FROM published_photo_tags WHERE photo_id='legacy-photo'",
+        ),
+        db.prepare(
+          "DELETE FROM published_photos WHERE photo_id='legacy-photo'",
+        ),
+      ]);
+      assert.deepEqual(await photos.getPublishedPhotoPlace('legacy-photo'), []);
+      assert.equal(
+        (
+          await db
+            .prepare('SELECT COUNT(*) AS n FROM photo_metadata_public')
+            .first()
+        ).n,
+        0,
+      );
+      assert.deepEqual(
+        await photos.getPhotoDraftPlace('legacy-photo', 'private'),
+        privateBefore,
+      );
+      await integrity(db);
+    });
+  });
+
+  it('retains column-explicit writes after future optional fields and relationships are added', async () => {
+    await withLegacy(async (db) => {
+      await applyLocalMigrations(db);
+      await db.batch([
+        ...[
+          'photo_drafts',
+          'tag_drafts',
+          'tag_draft_aliases',
+          'place_draft_aliases',
+          'tag_name_claims',
+          'tag_slugs',
+          'catalogue_test_migrations',
+        ].map((t) =>
+          db.prepare(`ALTER TABLE ${t} ADD COLUMN extension_note TEXT`),
+        ),
+      ]);
+      const photos = new CatalogueRepository(db),
+        places = new PlaceRepository(db);
+      const tag = await photos.createTag({
+        name: 'Extended tag',
+        aliases: ['Extended alias'],
+      });
+      await photos.saveTagDraft(tag.tagId, 1, {
+        ...tag,
+        name: 'Extended renamed',
+      });
+      const photo = await photos.createPhoto([tag.tagId]);
+      await photos.savePhotoMetadataDraft(photo.photoId, 1, {
+        title: 'Extended title',
+      });
+      const place = await places.create({
+        name: 'Extended place',
+        kind: 'site',
+        aliases: ['Extended location'],
+        provenance: { kind: 'manual' },
+      });
+      await places.saveDraft(place.placeId, 1, {
+        ...place,
+        name: 'Extended location name',
+        aliases: [],
+      });
+      assert.equal(
+        (await photos.getPhotoDraft(photo.photoId)).metadata.title,
+        'Extended title',
+      );
+      assert.deepEqual((await places.getDraft(place.placeId)).aliases, []);
+      await integrity(db);
+    });
+  });
+
+  it('rejects changed applied migration hashes before running the transition', async () => {
+    await withLegacy(async (db) => {
+      const original = await db
+        .prepare(
+          "SELECT sha256 FROM catalogue_test_migrations WHERE name='0001_catalogue.sql'",
+        )
         .first();
       await db
         .prepare(
-          'UPDATE catalogue_test_migrations SET sha256 = ? WHERE name = ?',
+          "UPDATE catalogue_test_migrations SET sha256='mismatch' WHERE name='0001_catalogue.sql'",
         )
-        .bind('mismatched-hash', '0001_catalogue.sql')
         .run();
       await assert.rejects(
         applyLocalMigrations(db),
-        /Applied migration changed: 0001_catalogue\.sql/,
+        /Applied migration changed/,
       );
       assert.equal(
-        await db
-          .prepare('SELECT name FROM catalogue_test_migrations WHERE name = ?')
-          .bind('0003_explicit_namespace_columns.sql')
-          .first(),
+        await statement(
+          db,
+          'SELECT name FROM catalogue_test_migrations WHERE name=?',
+          upgrade,
+        ).first(),
         null,
       );
-      await db
-        .prepare(
-          'UPDATE catalogue_test_migrations SET sha256 = ? WHERE name = ?',
-        )
-        .bind(old.sha256, '0001_catalogue.sql')
-        .run();
+      await statement(
+        db,
+        "UPDATE catalogue_test_migrations SET sha256=? WHERE name='0001_catalogue.sql'",
+        original.sha256,
+      ).run();
       await applyLocalMigrations(db);
-      await applyLocalMigrations(db);
-      assert.equal(
-        (
-          await db
-            .prepare('SELECT COUNT(*) AS count FROM catalogue_test_migrations')
-            .first()
-        ).count,
-        3,
-      );
-    }, '0002_metadata_places.sql');
+      await integrity(db);
+    });
   });
 });

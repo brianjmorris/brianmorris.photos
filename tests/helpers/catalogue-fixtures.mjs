@@ -7,7 +7,6 @@ export async function seedCatalogue(db, size, { dense = false } = {}) {
     id: `${prefix}-tag-${i.toString().padStart(3, '0')}`,
     name: `Fixture ${size} collection ${i}`,
     normalized: `fixture ${size} collection ${i}`,
-    slug: `${prefix}-collection-${i}`,
   }));
   const statement = (sql, ...values) => db.prepare(sql).bind(...values);
   const tagJson = JSON.stringify(tags);
@@ -17,8 +16,8 @@ export async function seedCatalogue(db, size, { dense = false } = {}) {
       tagJson,
     ),
     statement(
-      `INSERT INTO tag_revisions SELECT json_extract(value, '$.id'), 1, 0,
-      json_extract(value, '$.name'), json_extract(value, '$.normalized'), json_extract(value, '$.slug') FROM json_each(?)`,
+      `INSERT INTO tag_drafts (tag_id, revision, created_at, name, normalized_name) SELECT json_extract(value, '$.id'), 1, 0,
+      json_extract(value, '$.name'), json_extract(value, '$.normalized') FROM json_each(?)`,
       tagJson,
     ),
     statement(
@@ -70,12 +69,12 @@ export async function seedCatalogue(db, size, { dense = false } = {}) {
         json,
       ),
       statement(
-        `INSERT INTO photo_tags SELECT json_extract(p.value, '$.id'), 1, t.value
+        `INSERT INTO photo_draft_tags SELECT json_extract(p.value, '$.id'), 1, t.value
         FROM json_each(?) p, json_each(p.value, '$.tagIds') t`,
         json,
       ),
       statement(
-        "INSERT INTO photo_revisions SELECT json_extract(value, '$.id'), 1, 0 FROM json_each(?)",
+        "INSERT INTO photo_drafts SELECT json_extract(value, '$.id'), 1, 0 FROM json_each(?)",
         json,
       ),
       statement(
@@ -90,7 +89,7 @@ export async function seedCatalogue(db, size, { dense = false } = {}) {
       statement(
         `INSERT INTO published_photo_tags
         SELECT p.photo_id, p.photo_revision, t.tag_id, p.first_published_at
-        FROM published_photos p JOIN photo_tags t
+        FROM published_photos p JOIN photo_draft_tags t
           ON t.photo_id = p.photo_id AND t.photo_revision = p.photo_revision
         JOIN published_tags pt ON pt.tag_id = t.tag_id
         WHERE p.photo_id IN (SELECT json_extract(value, '$.id') FROM json_each(?))`,

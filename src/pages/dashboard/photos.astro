@@ -1,0 +1,218 @@
+---
+import { env } from 'cloudflare:workers';
+import EditorLayout from '../../components/dashboard/EditorLayout.astro';
+import PhotoReview from '../../components/dashboard/PhotoReview.tsx';
+import { CatalogueRepository } from '../../catalogue/repository.ts';
+import { CollectionRepository } from '../../catalogue/collections.ts';
+import { invalid } from '../../catalogue/model.ts';
+import {
+  readCollectionBody,
+  collectionError,
+} from '../../authoring/collections.ts';
+if (!Astro.locals.owner)
+  return new Response('Sign-in required.', { status: 403 });
+if (!['GET', 'HEAD', 'POST'].includes(Astro.request.method))
+  return new Response('Method not allowed.', {
+    status: 405,
+    headers: { Allow: 'GET, HEAD, POST' },
+  });
+const photos = env.CATALOGUE ? new CatalogueRepository(env.CATALOGUE) : null;
+const collections = env.CATALOGUE
+  ? new CollectionRepository(env.CATALOGUE)
+  : null;
+let error = '',
+  available = Boolean(photos);
+let selectedPhotos: string[] = [],
+  selectedCollections: string[] = [];
+let photoPage: Awaited<ReturnType<CatalogueRepository['listPhotoDrafts']>> = {
+  items: [],
+  nextAfter: null,
+};
+let collectionPage: Awaited<ReturnType<CollectionRepository['listDrafts']>> = {
+  items: [],
+  nextAfter: null,
+};
+if (photos && collections) {
+  if (Astro.request.method === 'POST') {
+    try {
+      const data = (await readCollectionBody(Astro.request, 'form', [
+        'photos',
+        'collectionIds',
+      ])) as Record<string, string[]>;
+      if (
+        Object.keys(data).some(
+          (key) => !['photos', 'collectionIds'].includes(key),
+        )
+      )
+        invalid('Unexpected selection field.');
+      selectedPhotos = data.photos ?? [];
+      selectedCollections = data.collectionIds ?? [];
+      const selection = selectedPhotos.map((value) => {
+        const match = /^([A-Za-z0-9_-]{1,80}):([1-9]\d*)$/.exec(value);
+        if (!match) invalid('Invalid photograph selection.');
+        return { photoId: match[1]!, expectedRevision: Number(match[2]) };
+      });
+      await collections.assignPhotos(selection, selectedCollections);
+      return Astro.redirect('/dashboard/photos?assigned=1', 303);
+    } catch (cause) {
+      const result = collectionError(cause);
+      error = result.message;
+      Astro.response.status = result.status;
+    }
+  }
+  try {
+    photoPage = await photos.listPhotoDrafts(
+      Astro.url.searchParams.get('after') ?? undefined,
+    );
+    collectionPage = await collections.listDrafts(
+      Astro.url.searchParams.get('collectionsAfter') ?? undefined,
+    );
+  } catch (cause) {
+    const result = collectionError(cause);
+    if (!error) error = result.message;
+    Astro.response.status = result.status;
+    available = false;
+  }
+} else {
+  error = 'Photograph review is temporarily unavailable.';
+  Astro.response.status = 503;
+}
+---
+
+<EditorLayout title="Photograph review" compactHeader>
+  <PhotoReview
+    client:load
+    initialPhotos={photoPage.items}
+    initialCollections={collectionPage.items}
+    photoAfter={photoPage.nextAfter}
+    collectionAfter={collectionPage.nextAfter}
+    storageAvailable={available}
+    attachmentsAvailable={available && Boolean(env.DRAFT_PHOTOS)}
+  />
+  <noscript>
+    <p class="notice">
+      Enable JavaScript for local image previews and batch review. You can still
+      assign collections to saved drafts below.
+    </p>
+    <p>
+      Choose photographs and collections. Each collection's required tags are
+      added directly; other tags are kept.
+    </p>
+    {error && (
+      <div class="notice error" role="alert">
+        <p>{error}</p>
+        {Astro.response.status === 409 && (
+          <a href="/dashboard/photos">
+            Reload the saved photographs before trying again
+          </a>
+        )}
+      </div>
+    )}
+    {!error && Astro.url.searchParams.has('assigned') && (
+      <p class="notice" role="status">
+        Required tags added to the selected drafts. Published photographs have
+        not changed.
+      </p>
+    )}
+    {available && (
+      <form method="post" action={Astro.url.pathname + Astro.url.search}>
+        <div class="workspace">
+          <section class="panel" aria-labelledby="photos-heading">
+            <h2 id="photos-heading">Photographs</h2>
+            {photoPage.items.map((photo) => (
+              <label class="choice">
+                <input
+                  type="checkbox"
+                  name="photos"
+                  value={`${photo.photoId}:${photo.revision}`}
+                  checked={selectedPhotos.includes(
+                    `${photo.photoId}:${photo.revision}`,
+                  )}
+                />
+                <span>
+                  {photo.title || 'Untitled photograph'}
+                  <span class="status">
+                    Tags:{' '}
+                    {photo.tags.length
+                      ? photo.tags.map((tag) => tag.name).join(', ')
+                      : 'No tags yet'}
+                  </span>
+                </span>
+              </label>
+            ))}
+            {!photoPage.items.length && (
+              <p>
+                No photographs yet. New photographs will appear here for review.
+              </p>
+            )}
+            <nav aria-label="Photograph pages">
+              {Astro.url.searchParams.has('after') && (
+                <a href="/dashboard/photos">First photographs</a>
+              )}
+              {photoPage.nextAfter && (
+                <a
+                  href={`/dashboard/photos?after=${encodeURIComponent(photoPage.nextAfter)}`}
+                >
+                  Next photographs
+                </a>
+              )}
+            </nav>
+          </section>
+          <section class="panel" aria-labelledby="collection-heading">
+            <h2 id="collection-heading">Assign collections</h2>
+            {collectionPage.items
+              .filter((c) => c.hasNotes || c.name)
+              .map((collection) => (
+                <label class="choice">
+                  <input
+                    type="checkbox"
+                    name="collectionIds"
+                    value={collection.collectionId}
+                    checked={selectedCollections.includes(
+                      collection.collectionId,
+                    )}
+                  />
+                  <span>
+                    {collection.name ??
+                      collection.tags.map((t) => t.name).join(' + ')}
+                    {collection.name && (
+                      <span class="status">
+                        {collection.tags.map((t) => t.name).join(' + ')}
+                      </span>
+                    )}
+                  </span>
+                </label>
+              ))}
+            {!collectionPage.items.some((c) => c.hasNotes || c.name) && (
+              <p>
+                No collections on this page.{' '}
+                <a href="/dashboard/collections">Manage collections</a>
+              </p>
+            )}
+            <nav aria-label="Assignment collection pages">
+              {Astro.url.searchParams.has('collectionsAfter') && (
+                <a
+                  href={`/dashboard/photos${Astro.url.searchParams.has('after') ? `?after=${encodeURIComponent(Astro.url.searchParams.get('after')!)}` : ''}`}
+                >
+                  First collections
+                </a>
+              )}
+              {collectionPage.nextAfter && (
+                <a
+                  href={`/dashboard/photos?collectionsAfter=${encodeURIComponent(collectionPage.nextAfter)}${Astro.url.searchParams.has('after') ? `&after=${encodeURIComponent(Astro.url.searchParams.get('after')!)}` : ''}`}
+                >
+                  Next collections
+                </a>
+              )}
+            </nav>
+          </section>
+        </div>
+        <p class="hint">
+          Apply this selection before changing pages. Photographs can also match
+          other collections through their tags.
+        </p>
+        <button type="submit">Add required tags to selected photographs</button>
+      </form>
+    )}
+  </noscript>
+</EditorLayout>

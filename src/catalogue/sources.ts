@@ -80,6 +80,13 @@ export class SourceMetadataRepository {
     input: SourceEvidenceInput,
     now = Date.now(),
   ): Promise<SourceEvidence> {
+    const { id, statement } = this.prepareRecord(photoId, input, now);
+    await writeCatalogueBatch(this.db, [statement]);
+    return (await this.get(id))!;
+  }
+
+  // Callers can include the immutable insert in an editorial save transaction.
+  prepareRecord(photoId: string, input: SourceEvidenceInput, now: number) {
     validId(photoId);
     validTime(now);
     if (
@@ -95,8 +102,9 @@ export class SourceMetadataRepository {
     const captureText = text(input.captureText, 200);
     const subseconds = text(input.captureSubseconds, 100);
     const offset = text(input.captureOffsetText, 100);
-    await writeCatalogueBatch(this.db, [
-      this.db
+    return {
+      id,
+      statement: this.db
         .prepare(
           `INSERT INTO photo_source_metadata
       (id, photo_id, source_sha256, original_filename, parser_name, parser_version, extracted_at, raw_json,
@@ -118,8 +126,18 @@ export class SourceMetadataRepository {
           gps?.latitude ?? null,
           gps?.longitude ?? null,
         ),
-    ]);
-    return (await this.get(id))!;
+    };
+  }
+
+  async findId(photoId: string, input: SourceEvidenceInput) {
+    const row = await this.db
+      .prepare(
+        `SELECT id FROM photo_source_metadata
+         WHERE photo_id = ? AND source_sha256 = ? AND parser_name = ? AND parser_version = ?`,
+      )
+      .bind(photoId, input.sha256, input.parser.name, input.parser.version)
+      .first<{ id: string }>();
+    return row?.id ?? null;
   }
 
   async get(id: string): Promise<SourceEvidence | null> {

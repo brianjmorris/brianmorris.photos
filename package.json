@@ -12,7 +12,7 @@
     "dev": "astro dev --host 127.0.0.1",
     "check": "astro check",
     "build": "astro build",
-    "test": "node --test tests/catalogue.test.mjs tests/metadata.test.mjs tests/migrations.test.mjs tests/discovery.test.mjs tests/owner-access.test.mjs",
+    "test": "node --test tests/catalogue.test.mjs tests/metadata.test.mjs tests/migrations.test.mjs tests/discovery.test.mjs tests/collections.test.mjs tests/owner-access.test.mjs tests/photo-review.test.mjs tests/jpeg-input.test.mjs",
     "verify": "npm run format:check && npm run check && npm test && npm run build",
     "deploy": "wrangler deploy --config dist/server/wrangler.json",
     "deploy:check": "wrangler deploy --config dist/server/wrangler.json --dry-run",
@@ -23,6 +23,9 @@
   "dependencies": {
     "@astrojs/cloudflare": "14.4.8",
     "@astrojs/react": "7.1.9",
+    "@colorhythm/exiftool-wasm": "1.0.9",
+    "@js-temporal/polyfill": "0.5.1",
+    "@photostructure/tz-lookup": "11.7.0",
     "astro": "7.4.12",
     "jose": "6.2.18",
     "react": "19.3.1",
