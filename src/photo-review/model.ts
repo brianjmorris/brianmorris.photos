@@ -11,6 +11,7 @@ export interface ReviewDraft {
   revision: number;
   title: string | null;
   tags: ReviewTag[];
+  attachment: 'none' | 'pending' | 'attached';
 }
 export interface ReviewCollection {
   collectionId: string;
@@ -22,6 +23,8 @@ export interface ReviewItem extends ReviewDraft {
   origin: 'local' | 'saved';
   saved: boolean;
   proposedTags?: string[];
+  attachmentError?: string;
+  duplicatePhotoId?: string;
   file?: File;
   fileName?: string;
   hash?: string;

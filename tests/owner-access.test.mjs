@@ -9,6 +9,7 @@ import { createOwnerAuthorizer } from '../src/auth/owner.ts';
 import { guardOwnerRequest, isOwnerPath } from '../src/auth/guard.ts';
 import { applyLocalMigrations } from './helpers/catalogue.mjs';
 import { verifyCollectionEditor } from './helpers/collections-integration.mjs';
+import { verifyDraftAttachments } from './helpers/draft-attachments-integration.mjs';
 
 const issuer = 'https://synthetic-team.cloudflareaccess.com';
 const env = {
@@ -528,6 +529,14 @@ describe('private request boundary', () => {
                   dev: { remote: false },
                 },
               ],
+              [
+                'DRAFT_PHOTOS',
+                {
+                  type: 'r2',
+                  name: 'disposable-owner-draft-photos',
+                  dev: { remote: false },
+                },
+              ],
             ]),
           },
           dev: {
@@ -601,6 +610,13 @@ describe('private request boundary', () => {
       await verifyCollectionEditor(
         configured,
         database,
+        headers,
+        assertPrivate,
+      );
+      await verifyDraftAttachments(
+        configured,
+        database,
+        await configured.getR2Bucket('DRAFT_PHOTOS'),
         headers,
         assertPrivate,
       );

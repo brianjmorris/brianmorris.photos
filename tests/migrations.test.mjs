@@ -46,6 +46,10 @@ describe('current-state migration on populated D1', () => {
         (await photos.getPhotoDraft('legacy-photo')).metadata.title,
         'Draft title',
       );
+      const { items } = await photos.listPhotoDrafts(undefined, 1, [
+        'legacy-photo',
+      ]);
+      assert.equal(items[0].attachment, 'none');
       assert.equal(
         (await photos.getPublishedPhotoMetadata('legacy-photo')).title,
         'Published title',
@@ -123,7 +127,7 @@ describe('current-state migration on populated D1', () => {
             .prepare('SELECT COUNT(*) AS n FROM catalogue_test_migrations')
             .first()
         ).n,
-        7,
+        8,
       );
       await integrity(db);
     });

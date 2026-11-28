@@ -87,6 +87,7 @@ if (photos && collections) {
     photoAfter={photoPage.nextAfter}
     collectionAfter={collectionPage.nextAfter}
     storageAvailable={available}
+    attachmentsAvailable={available && Boolean(env.DRAFT_PHOTOS)}
   />
   <noscript>
     <p class="notice">

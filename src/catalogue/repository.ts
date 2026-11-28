@@ -426,7 +426,7 @@ export class CatalogueRepository {
       photoIds.forEach(validId);
     }
     const rows = await this.statement(
-      `SELECT p.id, p.draft_revision, m.title,
+      `SELECT p.id, p.draft_revision, m.title, attachment.state AS attachment,
       (SELECT json_group_array(json_object('tagId', tagged.tag_id, 'name', tagged.name)) FROM (
         SELECT pt.tag_id, tr.name FROM photo_tags pt
         JOIN tags t ON t.id = pt.tag_id
@@ -435,7 +435,11 @@ export class CatalogueRepository {
         ORDER BY tr.name COLLATE NOCASE, pt.tag_id
       ) tagged) AS tags_json FROM photos p
       LEFT JOIN photo_metadata_states m ON m.photo_id = p.id AND m.photo_revision = p.draft_revision
+      LEFT JOIN photo_draft_attachments attachment ON attachment.photo_id=p.id
+        AND attachment.state IN ('pending', 'attached')
+        AND (attachment.state='attached' OR attachment.expires_at>?)
       WHERE p.draft_revision IS NOT NULL ${afterId ? 'AND p.id > ?' : ''} ${photoIds ? 'AND p.id IN (SELECT value FROM json_each(?))' : ''} ORDER BY p.id LIMIT ?`,
+      Date.now(),
       ...(afterId ? [afterId] : []),
       ...(photoIds ? [JSON.stringify(photoIds)] : []),
       limit + 1,
@@ -444,12 +448,14 @@ export class CatalogueRepository {
       draft_revision: number;
       title: string | null;
       tags_json: string;
+      attachment: 'pending' | 'attached' | null;
     }>();
     const items = rows.results.slice(0, limit).map((row) => ({
       photoId: row.id,
       revision: row.draft_revision,
       title: row.title,
       tags: JSON.parse(row.tags_json) as { tagId: string; name: string }[],
+      attachment: row.attachment ?? ('none' as const),
     }));
     return {
       items,

@@ -34,27 +34,35 @@ interface Props {
   photoAfter: string | null;
   collectionAfter: string | null;
   storageAvailable: boolean;
+  attachmentsAvailable: boolean;
 }
 class ReviewRequestError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly existingPhotoId?: string,
   ) {
     super(message);
   }
 }
 async function request<T>(url: string, body?: unknown): Promise<T> {
-  const response = await fetch(url, {
-    credentials: 'same-origin',
-    cache: 'no-store',
-    redirect: 'error',
-    ...(body === undefined
-      ? {}
+  return reviewRequest<T>(
+    url,
+    body === undefined
+      ? undefined
       : {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
-        }),
+        },
+  );
+}
+async function reviewRequest<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, {
+    credentials: 'same-origin',
+    cache: 'no-store',
+    redirect: 'error',
+    ...init,
   });
   const type = response.headers.get('content-type') ?? '';
   if (!type.includes('application/json'))
@@ -67,8 +75,15 @@ async function request<T>(url: string, body?: unknown): Promise<T> {
     throw new ReviewRequestError(
       data.error ?? 'Draft details could not be saved. Try again.',
       response.status,
+      typeof data.existingPhotoId === 'string'
+        ? data.existingPhotoId
+        : undefined,
     );
   return data as T;
+}
+
+function attachmentUrl(photoId: string) {
+  return `/api/owner/photos/${encodeURIComponent(photoId)}/attachment`;
 }
 
 export default function PhotoReview(props: Props) {
@@ -80,9 +95,16 @@ export default function PhotoReview(props: Props) {
     })),
   );
   const [collections, setCollections] = useState(props.initialCollections);
-  const [mode, setMode] = useState<'local' | 'saved'>('local');
+  const [mode, setMode] = useState<'local' | 'saved'>(
+    props.initialPhotos.some((photo) => photo.attachment === 'attached')
+      ? 'saved'
+      : 'local',
+  );
   const [selected, setSelected] = useState<string[]>([]),
-    [focusId, setFocusId] = useState<string | null>(null);
+    [focusId, setFocusId] = useState<string | null>(
+      props.initialPhotos.find((photo) => photo.attachment === 'attached')
+        ?.photoId ?? null,
+    );
   const [chosen, setChosen] = useState<string[]>([]),
     [search, setSearch] = useState('');
   const [chosenTags, setChosenTags] = useState<ChosenTag[]>([]);
@@ -95,6 +117,8 @@ export default function PhotoReview(props: Props) {
     [error, setError] = useState('');
   const [failures, setFailures] = useState<string[]>([]),
     [conflict, setConflict] = useState(false);
+  const [uploading, setUploading] = useState<string | null>(null);
+  const [failedPreview, setFailedPreview] = useState<string | null>(null);
   const [editingCapture, setEditingCapture] = useState<{
     title: string | null;
     draft: PhotoCaptureDraft;
@@ -116,6 +140,13 @@ export default function PhotoReview(props: Props) {
     mode === 'local' ? item.origin === 'local' : item.saved,
   );
   const active = visible.find((item) => item.photoId === focusId) ?? visible[0];
+  const storedPreview =
+    active?.attachment === 'attached' && props.attachmentsAvailable
+      ? attachmentUrl(active.photoId)
+      : undefined;
+  const previewUrl =
+    active?.previewUrl ??
+    (storedPreview !== failedPreview ? storedPreview : undefined);
   const selection = items.filter((item) => selected.includes(item.photoId));
   const picked = collections.filter((collection) =>
     chosen.includes(collection.collectionId),
@@ -140,6 +171,9 @@ export default function PhotoReview(props: Props) {
     .slice(0, 8)
     .join(',');
   const unsaved = selection.filter((item) => !item.saved);
+  const selectedAttachments = selection.filter(
+    (item) => item.file && item.attachment !== 'attached',
+  );
   const activePosition = active ? visible.indexOf(active) : -1;
   const searchText = search.toLocaleLowerCase();
   const shownCollections = collections.filter(
@@ -335,6 +369,7 @@ export default function PhotoReview(props: Props) {
               revision: 1,
               title: file.name.replace(/\.[^.]+$/, '').slice(0, 300),
               tags: [],
+              attachment: 'none',
               origin: 'local',
               saved: false,
               ...image,
@@ -449,25 +484,146 @@ export default function PhotoReview(props: Props) {
       setBusy(false);
     }
   }
-  async function saveDrafts() {
-    if (!unsaved.length || busy) return;
+  async function updateAttachment(
+    item: ReviewItem,
+    method: 'PUT' | 'POST' | 'DELETE',
+  ) {
+    let attachmentError: string | undefined;
+    let duplicatePhotoId: string | undefined;
+    let attachment = item.attachment;
+    setUploading(item.photoId);
+    try {
+      const result = await reviewRequest<{ status: 'attached' | 'none' }>(
+        attachmentUrl(item.photoId),
+        {
+          method,
+          ...(method === 'PUT'
+            ? {
+                body: item.file,
+                headers: {
+                  'Content-Type': 'image/jpeg',
+                  'X-Photo-SHA256': item.hash!,
+                },
+              }
+            : {}),
+        },
+      );
+      attachment = result.status;
+      setFailedPreview(null);
+    } catch (cause) {
+      if (cause instanceof ReviewRequestError)
+        duplicatePhotoId = cause.existingPhotoId;
+      attachmentError =
+        cause instanceof Error
+          ? cause.message
+          : 'The attachment action failed. Try again.';
+      try {
+        const result = await request<{ items: ReviewDraft[] }>(
+          `/api/owner/photos?ids=${encodeURIComponent(item.photoId)}`,
+        );
+        attachment = result.items[0]?.attachment ?? attachment;
+      } catch {
+        // Keep the last confirmed state when the connection is unavailable.
+      }
+    } finally {
+      setUploading(null);
+      setItems((current) =>
+        current.map((photo) =>
+          photo.photoId === item.photoId
+            ? { ...photo, attachment, attachmentError, duplicatePhotoId }
+            : photo,
+        ),
+      );
+    }
+    return attachmentError;
+  }
+
+  async function changeAttachment(
+    item: ReviewItem,
+    method: 'PUT' | 'POST' | 'DELETE',
+  ) {
+    if (busy || !props.attachmentsAvailable) return;
+    resetMessages();
+    setBusy(true);
+    try {
+      if (!(await updateAttachment(item, method)))
+        setNotice(
+          method === 'DELETE'
+            ? 'The draft photo was removed.'
+            : 'The JPEG is attached to the draft.',
+        );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openSavedDraft(photoId: string) {
     resetMessages();
     setBusy(true);
     try {
       const result = await request<{ items: ReviewDraft[] }>(
-        '/api/owner/photos',
-        draftDetails(unsaved),
+        `/api/owner/photos?ids=${encodeURIComponent(photoId)}`,
       );
-      if (result.items.length !== unsaved.length)
-        throw new Error(
-          'Some draft details could not be confirmed. Retry with the same selection.',
-        );
+      if (!result.items.length)
+        throw new Error('The existing draft is unavailable.');
       mergeDrafts(result.items);
-      for (const item of result.items)
-        logProcessing(item.photoId, 'Saved the draft title and tags.');
-      setTagSearchVersion((version) => version + 1);
+      switchMode('saved');
+      setFocusId(photoId);
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : 'Could not open the existing draft.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveDrafts(withPhotos = false) {
+    if (
+      busy ||
+      (!unsaved.length && (!withPhotos || !selectedAttachments.length))
+    )
+      return;
+    resetMessages();
+    setBusy(true);
+    try {
+      if (unsaved.length) {
+        const result = await request<{ items: ReviewDraft[] }>(
+          '/api/owner/photos',
+          draftDetails(unsaved),
+        );
+        if (result.items.length !== unsaved.length)
+          throw new Error(
+            'Some draft details could not be confirmed. Retry with the same selection.',
+          );
+        mergeDrafts(result.items);
+        for (const item of result.items)
+          logProcessing(item.photoId, 'Saved the draft title and tags.');
+        setTagSearchVersion((version) => version + 1);
+      }
+      if (!withPhotos) {
+        setNotice(
+          `${unsaved.length} draft ${unsaved.length === 1 ? 'saved' : 'drafts saved'}${unsaved.length === 1 ? ' without a photo.' : ' without photos.'}`,
+        );
+        return;
+      }
+      const errors: string[] = [];
+      for (const [index, item] of selectedAttachments.entries()) {
+        setProgress(
+          `Attaching photo ${index + 1} of ${selectedAttachments.length}…`,
+        );
+        const failure = await updateAttachment(item, 'PUT');
+        if (failure)
+          errors.push(
+            `${item.title || item.fileName || 'Untitled photograph'}: ${failure}`,
+          );
+      }
+      setFailures(errors);
+      const count = selectedAttachments.length - errors.length;
       setNotice(
-        `${result.items.length} draft details saved. Image files and previews remain on this device. Reselect matching files to restore previews after leaving this page.`,
+        `${count} ${count === 1 ? 'photo attached' : 'photos attached'}.${errors.length ? ' Draft details are saved. Retry the photos that need attention.' : ''}`,
       );
     } catch (cause) {
       for (const item of unsaved)
@@ -478,6 +634,7 @@ export default function PhotoReview(props: Props) {
           : 'Draft details could not be saved. Retry with this selection.',
       );
     } finally {
+      setProgress('');
       setBusy(false);
     }
   }
@@ -664,7 +821,10 @@ export default function PhotoReview(props: Props) {
     <div className="photo-review" aria-busy={busy}>
       <div className="review-intro">
         <div>
-          <p>Choose local JPEGs to review. Image files stay on this device.</p>
+          <p>
+            Choose JPEGs to review. Photos upload only when you save with photos
+            or attach one to a draft.
+          </p>
         </div>
         <button
           className="primary"
@@ -770,9 +930,14 @@ export default function PhotoReview(props: Props) {
                   }
                 }}
               >
-                {active.previewUrl ? (
+                {previewUrl ? (
                   <img
-                    src={active.previewUrl}
+                    src={previewUrl}
+                    onError={
+                      previewUrl === storedPreview
+                        ? () => setFailedPreview(previewUrl)
+                        : undefined
+                    }
                     alt={
                       active.title ||
                       active.fileName ||
@@ -782,11 +947,15 @@ export default function PhotoReview(props: Props) {
                 ) : (
                   <div className="missing-preview">
                     <span aria-hidden="true">▧</span>
-                    <h2>Choose a local preview</h2>
+                    <h2>
+                      {active.attachment === 'attached'
+                        ? 'Draft photo unavailable'
+                        : 'Choose a JPEG for this draft'}
+                    </h2>
                     <p>
-                      Reselect the matching JPEG for this draft.
-                      <br />
-                      The link lasts for this session.
+                      {active.attachment === 'attached'
+                        ? 'The draft details are still available.'
+                        : 'Choose the photo you want to review and attach.'}
                     </p>
                     <button
                       type="button"
@@ -794,11 +963,11 @@ export default function PhotoReview(props: Props) {
                       onClick={() => attach.current?.click()}
                       disabled={busy}
                     >
-                      Choose matching file
+                      Choose JPEG
                     </button>
                   </div>
                 )}
-                {active.previewUrl && (
+                {previewUrl && (
                   <button
                     type="button"
                     className="expand-preview"
@@ -808,6 +977,84 @@ export default function PhotoReview(props: Props) {
                   </button>
                 )}
               </div>
+              {active.saved && props.attachmentsAvailable && (
+                <div className="draft-attachment">
+                  <span className="small-note">
+                    {uploading === active.photoId
+                      ? 'Updating photo…'
+                      : active.attachment === 'attached'
+                        ? 'Private photo attached'
+                        : active.attachment === 'pending'
+                          ? 'Photo upload pending'
+                          : 'No photo attached'}
+                  </span>
+                  {active.attachment !== 'attached' && active.file && (
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() => void changeAttachment(active, 'PUT')}
+                    >
+                      {active.attachmentError || active.attachment === 'pending'
+                        ? 'Retry photo upload'
+                        : 'Attach photo'}
+                    </button>
+                  )}
+                  {active.attachment === 'pending' && !active.file && (
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() => void changeAttachment(active, 'POST')}
+                    >
+                      Check previous upload
+                    </button>
+                  )}
+                  {active.attachment !== 'none' && (
+                    <button
+                      type="button"
+                      className="text-button"
+                      disabled={busy}
+                      onClick={() => {
+                        if (
+                          active.attachment === 'pending' ||
+                          window.confirm(
+                            'Remove the private JPEG from this draft?',
+                          )
+                        )
+                          void changeAttachment(active, 'DELETE');
+                      }}
+                    >
+                      {active.attachment === 'pending'
+                        ? 'Cancel upload'
+                        : 'Remove photo from draft'}
+                    </button>
+                  )}
+                  {active.attachment !== 'attached' && active.file && (
+                    <p className="small-note">
+                      The private JPEG keeps its embedded metadata, including
+                      any GPS.
+                    </p>
+                  )}
+                  {active.attachmentError && (
+                    <p className="small-note" role="alert">
+                      {active.attachmentError}
+                    </p>
+                  )}
+                  {active.duplicatePhotoId && (
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() =>
+                        void openSavedDraft(active.duplicatePhotoId!)
+                      }
+                    >
+                      Open existing draft
+                    </button>
+                  )}
+                </div>
+              )}
               <div className="preview-caption">
                 <div>
                   <strong>
@@ -929,6 +1176,19 @@ export default function PhotoReview(props: Props) {
                         ? item.tags.map((tag) => tag.name).join(' · ')
                         : 'No tags yet'}
                     </span>
+                    {(uploading === item.photoId ||
+                      item.attachmentError ||
+                      item.attachment !== 'none') && (
+                      <span className="thumbnail-tags">
+                        {uploading === item.photoId
+                          ? 'Updating photo…'
+                          : item.attachmentError
+                            ? 'Photo needs attention'
+                            : item.attachment === 'attached'
+                              ? 'Photo attached'
+                              : 'Upload pending'}
+                      </span>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -1226,15 +1486,46 @@ export default function PhotoReview(props: Props) {
             </section>
           )}
           <section className="inspector-section save-section">
+            {props.attachmentsAvailable && (
+              <>
+                <button
+                  type="button"
+                  className="primary full-width"
+                  disabled={
+                    busy ||
+                    !selectedAttachments.length ||
+                    !props.storageAvailable
+                  }
+                  onClick={() => void saveDrafts(true)}
+                >
+                  {unsaved.length || !selectedAttachments.length
+                    ? selectedAttachments.length === 1
+                      ? 'Save draft with photo'
+                      : 'Save drafts with photos'
+                    : selectedAttachments.length === 1
+                      ? 'Attach selected photo'
+                      : 'Attach selected photos'}
+                </button>
+                <p className="small-note">
+                  Private JPEGs keep their embedded metadata, including any GPS.
+                </p>
+              </>
+            )}
             <button
               type="button"
-              className="primary full-width"
+              className={
+                props.attachmentsAvailable
+                  ? 'secondary full-width'
+                  : 'primary full-width'
+              }
               disabled={busy || !unsaved.length || !props.storageAvailable}
               onClick={() => void saveDrafts()}
             >
               {unsaved.length
-                ? `Save ${unsaved.length} new ${unsaved.length === 1 ? 'draft' : 'drafts'}`
-                : 'Save new drafts'}
+                ? `Save ${unsaved.length} new ${unsaved.length === 1 ? 'draft' : 'drafts'}${props.attachmentsAvailable ? ' without photos' : ''}`
+                : props.attachmentsAvailable
+                  ? 'Save draft details only'
+                  : 'Save new drafts'}
             </button>
             <p className="small-note">
               Save new drafts records titles and tags. Capture metadata has its
@@ -1265,9 +1556,9 @@ export default function PhotoReview(props: Props) {
         >
           Close preview · Esc
         </button>
-        {active?.previewUrl && (
+        {active && previewUrl && (
           <img
-            src={active.previewUrl}
+            src={previewUrl}
             alt={active.title || active.fileName || 'Enlarged local photograph'}
           />
         )}
