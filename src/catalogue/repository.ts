@@ -206,6 +206,13 @@ export class CatalogueRepository {
       }
     }
     const writes = [
+      // The identity guard rejects discarded IDs inside this transaction,
+      // including a discard committed after the existence checks above.
+      this.statement(
+        `UPDATE photos SET discarded_draft_revision=discarded_draft_revision
+         WHERE discarded_draft_revision IS NOT NULL AND id IN (SELECT value FROM json_each(?))`,
+        JSON.stringify([...seen]),
+      ),
       ...this.resolveOrCreateTagStatements(newNames, now),
       ...statements,
     ];
@@ -219,6 +226,31 @@ export class CatalogueRepository {
         results[writes.length + index].results[0],
       )!,
     );
+  }
+
+  async discardPhotoDraft(id: string, expectedRevision: number) {
+    validId(id);
+    validRevision(expectedRevision);
+    const [, head] = await writeCatalogueBatch(this.db, [
+      this.statement(
+        `UPDATE photos SET draft_revision=NULL, discarded_draft_revision=draft_revision
+         WHERE id=? AND draft_revision=?`,
+        id,
+        expectedRevision,
+      ),
+      this.statement(
+        'SELECT draft_revision, discarded_draft_revision FROM photos WHERE id=?',
+        id,
+      ),
+    ]);
+    const photo = head.results[0];
+    if (photo?.discarded_draft_revision === expectedRevision) return;
+    if (photo?.draft_revision != null)
+      throw new CatalogueError(
+        'conflict',
+        'The draft has changed. Reload Photo Review before discarding it.',
+      );
+    throw new CatalogueError('not_found', 'Photo draft unavailable.');
   }
 
   async savePhotoDraft(

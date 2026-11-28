@@ -3,6 +3,7 @@ import {
   DraftAttachmentRepository,
   draftAttachmentPrefix,
   type DraftAttachment,
+  type DraftCleanupTrigger,
 } from '../catalogue/draft-attachments.ts';
 import { CatalogueError, invalid } from '../catalogue/model.ts';
 import { INPUT_LIMITS, inspectJpeg } from '../photo-review/jpeg-input.ts';
@@ -305,8 +306,46 @@ export async function cleanDraftPhotos(
   );
   if (orphaned.length)
     await bucket.delete(orphaned.map((object) => object.key));
-  return Response.json({
+  return {
     nextCursor: page.truncated ? page.cursor : null,
     moreRetired: retired.length === 32,
-  });
+    scanned: page.objects.length,
+    retiredKeys: retired.length,
+    orphanedKeys: orphaned.length,
+  };
+}
+
+export async function runDraftPhotoCleanup(
+  db: CatalogueDatabase,
+  bucket: DraftPhotoBucket,
+  trigger: DraftCleanupTrigger,
+) {
+  const startedAt = Date.now();
+  const repository = new DraftAttachmentRepository(db);
+  try {
+    const progress = await repository.cleanupProgress();
+    if (!progress) throw new Error('Missing draft photo cleanup checkpoint.');
+    const { nextCursor, ...summary } = await cleanDraftPhotos(
+      repository,
+      bucket,
+      progress.cursor ?? undefined,
+    );
+    // Concurrent invocations can clean the same page. Only the current
+    // revision can move the checkpoint past that page.
+    const advanced = await repository.completeCleanup(
+      progress.revision,
+      nextCursor,
+      trigger,
+      startedAt,
+      { ...summary, moreWork: nextCursor !== null || summary.moreRetired },
+    );
+    return { ...summary, advanced, scanComplete: nextCursor === null };
+  } catch (error) {
+    try {
+      await repository.recordCleanupFailure(trigger, startedAt);
+    } catch {
+      // A D1 outage can prevent status recording. Preserve the original failure.
+    }
+    throw error;
+  }
 }

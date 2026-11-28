@@ -4,6 +4,24 @@ import { validId } from './validation.ts';
 const pendingLifetime = 24 * 60 * 60 * 1000;
 export const draftAttachmentPrefix = 'draft-jpegs/';
 export type DraftAttachmentState = 'pending' | 'attached' | 'retired';
+export type DraftCleanupTrigger = 'scheduled' | 'manual';
+
+interface DraftCleanupCounts {
+  scanned: number;
+  retiredKeys: number;
+  orphanedKeys: number;
+  moreWork: boolean;
+}
+
+interface DraftCleanupRun {
+  trigger: DraftCleanupTrigger;
+  finished_at: number;
+  outcome: 'completed' | 'failed';
+  scanned: number | null;
+  retired_keys: number | null;
+  orphaned_keys: number | null;
+  more_work: 0 | 1 | null;
+}
 
 export interface DraftAttachment {
   id: string;
@@ -18,7 +36,11 @@ const hasDraft =
   'EXISTS (SELECT 1 FROM photos WHERE id=?1 AND draft_revision IS NOT NULL)';
 
 export class DraftAttachmentRepository {
-  constructor(private readonly db: CatalogueDatabase) {}
+  private readonly db: CatalogueDatabase;
+
+  constructor(db: CatalogueDatabase) {
+    this.db = db;
+  }
 
   private statement(sql: string, ...values: (string | number)[]) {
     return this.db.prepare(sql).bind(...values);
@@ -132,5 +154,73 @@ export class DraftAttachmentRepository {
       JSON.stringify(ids),
     ).all<{ id: string }>();
     return new Set(results.map(({ id }) => id));
+  }
+
+  async cleanupProgress() {
+    return this.db
+      .prepare(
+        'SELECT cursor, revision FROM draft_photo_cleanup_progress WHERE id=1',
+      )
+      .first<{ cursor: string | null; revision: number }>();
+  }
+
+  private cleanupRunStatement(
+    trigger: DraftCleanupTrigger,
+    startedAt: number,
+    result: DraftCleanupCounts | null,
+  ) {
+    return this.db
+      .prepare(
+        `INSERT INTO draft_photo_cleanup_runs
+          (trigger, started_at, finished_at, outcome, scanned, retired_keys, orphaned_keys, more_work)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(trigger) DO UPDATE SET started_at=excluded.started_at,
+           finished_at=excluded.finished_at, outcome=excluded.outcome, scanned=excluded.scanned,
+           retired_keys=excluded.retired_keys, orphaned_keys=excluded.orphaned_keys,
+           more_work=excluded.more_work
+         WHERE excluded.started_at >= draft_photo_cleanup_runs.started_at`,
+      )
+      .bind(
+        trigger,
+        startedAt,
+        Math.max(Date.now(), startedAt),
+        result ? 'completed' : 'failed',
+        result?.scanned ?? null,
+        result?.retiredKeys ?? null,
+        result?.orphanedKeys ?? null,
+        result ? Number(result.moreWork) : null,
+      );
+  }
+
+  async completeCleanup(
+    revision: number,
+    cursor: string | null,
+    trigger: DraftCleanupTrigger,
+    startedAt: number,
+    counts: DraftCleanupCounts,
+  ) {
+    const [advance] = (await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE draft_photo_cleanup_progress SET cursor=?, revision=revision+1
+         WHERE id=1 AND revision=? RETURNING revision`,
+        )
+        .bind(cursor, revision),
+      this.cleanupRunStatement(trigger, startedAt, counts),
+    ])) as [{ results: { revision: number }[] }, unknown];
+    return advance.results.length > 0;
+  }
+
+  async recordCleanupFailure(trigger: DraftCleanupTrigger, startedAt: number) {
+    await this.cleanupRunStatement(trigger, startedAt, null).run();
+  }
+
+  async latestCleanupRuns() {
+    const { results } = await this.db
+      .prepare(
+        'SELECT trigger, finished_at, outcome, scanned, retired_keys, orphaned_keys, more_work FROM draft_photo_cleanup_runs',
+      )
+      .all<DraftCleanupRun>();
+    return results;
   }
 }

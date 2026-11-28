@@ -803,19 +803,50 @@ export default function PhotoReview(props: Props) {
       setBusy(false);
     }
   }
-  function removeActive() {
-    if (!active || busy) return;
-    release(active);
+  function removeReviewItem(item: ReviewItem) {
+    release(item);
     setItems((current) =>
-      current.filter((item) => item.photoId !== active.photoId),
+      current.filter((photo) => photo.photoId !== item.photoId),
     );
-    setSelected((current) => current.filter((id) => id !== active.photoId));
+    setSelected((current) => current.filter((id) => id !== item.photoId));
     setFocusId(null);
     setProcessing((current) => {
       const next = { ...current };
-      delete next[active.photoId];
+      delete next[item.photoId];
       return next;
     });
+  }
+  async function discardDraft(item: ReviewItem) {
+    if (busy || !props.storageAvailable) return;
+    if (
+      !window.confirm(
+        'Discard this photo draft? Its edits will be deleted and any private JPEG queued for removal. Any published version stays online.',
+      )
+    )
+      return;
+    resetMessages();
+    setBusy(true);
+    try {
+      await reviewRequest(
+        `/api/owner/photos/${encodeURIComponent(item.photoId)}`,
+        {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ expectedRevision: item.revision }),
+        },
+      );
+      removeReviewItem(item);
+      setTagSearchVersion((version) => version + 1);
+      setNotice('Photo draft discarded.');
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : 'Could not discard the photo draft.',
+      );
+    } finally {
+      setBusy(false);
+    }
   }
   return (
     <div className="photo-review" aria-busy={busy}>
@@ -1536,9 +1567,19 @@ export default function PhotoReview(props: Props) {
                 type="button"
                 className="text-button"
                 disabled={busy}
-                onClick={removeActive}
+                onClick={() => removeReviewItem(active)}
               >
                 Remove this photograph from the local batch
+              </button>
+            )}
+            {active?.saved && (
+              <button
+                type="button"
+                className="text-button"
+                disabled={busy || !props.storageAvailable}
+                onClick={() => void discardDraft(active)}
+              >
+                Discard draft
               </button>
             )}
           </section>

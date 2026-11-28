@@ -9,7 +9,10 @@ import { createOwnerAuthorizer } from '../src/auth/owner.ts';
 import { guardOwnerRequest, isOwnerPath } from '../src/auth/guard.ts';
 import { applyLocalMigrations } from './helpers/catalogue.mjs';
 import { verifyCollectionEditor } from './helpers/collections-integration.mjs';
-import { verifyDraftAttachments } from './helpers/draft-attachments-integration.mjs';
+import {
+  verifyDraftAttachments,
+  verifyDraftCleanup,
+} from './helpers/draft-attachments-integration.mjs';
 
 const issuer = 'https://synthetic-team.cloudflareaccess.com';
 const env = {
@@ -442,7 +445,7 @@ describe('private request boundary', () => {
     assert.equal(await failed.text(), 'Dashboard unavailable.');
   });
 
-  it('runs the built Worker with public access, identity checks and protected collection editing', async () => {
+  it('runs the built Worker with public access, identity checks and private editorial workflows', async () => {
     // Build current source instead of relying on potentially stale dist output.
     execFileSync(
       process.execPath,
@@ -507,6 +510,7 @@ describe('private request boundary', () => {
     }
     const configured = new Miniflare({
       host: '127.0.0.1',
+      unsafeTriggerHandlers: true,
       enableDevRegistry: false,
       telemetry: { enabled: false },
       workers: [
@@ -613,10 +617,18 @@ describe('private request boundary', () => {
         headers,
         assertPrivate,
       );
+      const bucket = await configured.getR2Bucket('DRAFT_PHOTOS');
       await verifyDraftAttachments(
         configured,
         database,
-        await configured.getR2Bucket('DRAFT_PHOTOS'),
+        bucket,
+        headers,
+        assertPrivate,
+      );
+      await verifyDraftCleanup(
+        configured,
+        database,
+        bucket,
         headers,
         assertPrivate,
       );

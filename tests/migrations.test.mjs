@@ -127,7 +127,7 @@ describe('current-state migration on populated D1', () => {
             .prepare('SELECT COUNT(*) AS n FROM catalogue_test_migrations')
             .first()
         ).n,
-        8,
+        11,
       );
       await integrity(db);
     });

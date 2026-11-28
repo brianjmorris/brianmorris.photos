@@ -52,6 +52,10 @@ export async function writeCatalogueBatch(
         'This tag combination already has a saved draft. Open that combination to edit it.',
         { cause },
       );
+    if (/photo_draft_discarded/.test(message))
+      throw new CatalogueError('conflict', 'This photo draft was discarded.', {
+        cause,
+      });
     if (/invalid_place_(hierarchy|parent_kind)/.test(message))
       throw new CatalogueError(
         'invalid_input',

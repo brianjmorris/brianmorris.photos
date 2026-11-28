@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { runDraftPhotoCleanup } from '../../src/authoring/photo-attachments.ts';
+import { DraftAttachmentRepository } from '../../src/catalogue/draft-attachments.ts';
 import { CatalogueRepository } from '../../src/catalogue/repository.ts';
 
 // Synthetic 2×2 JPEG, with a comment added so exact metadata preservation is checked.
@@ -15,6 +17,165 @@ const withComment = (comment) =>
     baseJpeg.subarray(2),
   ]);
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+
+export async function verifyDraftCleanup(
+  worker,
+  db,
+  bucket,
+  identity,
+  assertPrivate,
+) {
+  const photos = new CatalogueRepository(db);
+  const attachments = new DraftAttachmentRepository(db);
+  const origin = 'https://photos.example.test';
+  const page = origin + '/dashboard/storage';
+  const openPage = async (path = page) => {
+    const response = await worker.dispatchFetch(path, { headers: identity });
+    assert.equal(response.status, 200);
+    assertPrivate(response);
+    return response.text();
+  };
+  const post = (requestOrigin) =>
+    worker.dispatchFetch(page, {
+      method: 'POST',
+      headers: { ...identity, Origin: requestOrigin },
+      redirect: 'manual',
+    });
+  const now = Date.now();
+  const progress = await attachments.cleanupProgress();
+  assert.deepEqual(progress, { cursor: null, revision: 0 });
+  assert.match(await openPage(), /No runs recorded/);
+  for (const method of ['GET', 'POST']) {
+    const denied = await worker.dispatchFetch(page, { method });
+    assert.equal(denied.status, 401);
+    assertPrivate(denied);
+  }
+  const crossOrigin = await post('https://elsewhere.example.test');
+  assert.equal(crossOrigin.status, 403);
+  assert.doesNotMatch(
+    await crossOrigin.text(),
+    /Scheduled cleanup|Manual cleanup/,
+  );
+  assert.deepEqual(await attachments.cleanupProgress(), progress);
+
+  async function storedFixture(name, reservedAt = now) {
+    const { photoId } = await photos.createPhoto();
+    const bytes = withComment(name);
+    const digest = hash(bytes);
+    const { own } = await attachments.reserve(
+      photoId,
+      digest,
+      bytes.length,
+      reservedAt,
+    );
+    const key = `draft-jpegs/${own.id}`;
+    await bucket.put(key, bytes, { sha256: digest });
+    return { own, key };
+  }
+  const active = await storedFixture('Cleanup attached fixture');
+  assert(await attachments.promote(active.own, now));
+  const pending = await storedFixture('Cleanup live upload fixture');
+  const expired = await storedFixture(
+    'Cleanup expired fixture',
+    now - 25 * 60 * 60 * 1000,
+  );
+  const orphanKeys = Array.from(
+    { length: 34 },
+    (_, index) =>
+      `draft-jpegs/cleanup-orphan-${String(index).padStart(2, '0')}`,
+  );
+  await Promise.all(orphanKeys.map((key) => bucket.put(key, baseJpeg)));
+  await bucket.put('another-prefix/untouched', baseJpeg);
+
+  const unavailable = {
+    delete() {
+      throw new Error('Simulated R2 deletion failure');
+    },
+  };
+  await assert.rejects(
+    runDraftPhotoCleanup(db, unavailable, 'scheduled'),
+    /Simulated R2 deletion failure/,
+  );
+  assert.deepEqual(await attachments.cleanupProgress(), progress);
+  assert((await attachments.retiredIds()).includes(expired.own.id));
+  assert(await bucket.head(expired.key));
+  const failedPage = await openPage();
+  assert.match(failedPage, /<strong\b[^>]*>Failed<\/strong>/);
+  assert.doesNotMatch(failedPage, /Simulated R2|draft-jpegs\//);
+
+  async function scheduled() {
+    const response = await worker.dispatchFetch(
+      'http://localhost/cdn-cgi/local/scheduled?format=json',
+    );
+    assert.equal(response.status, 200, await response.text());
+  }
+
+  await scheduled();
+  const first = await attachments.cleanupProgress();
+  assert.equal(first.revision, 1);
+  assert(first.cursor);
+  assert.equal(await bucket.head(expired.key), null);
+  const scheduledResult = (await attachments.latestCleanupRuns())[0];
+  assert.equal(scheduledResult.outcome, 'completed');
+  assert.match(await openPage(), /Another pass may be needed/);
+
+  const stale = await attachments.completeCleanup(
+    progress.revision,
+    null,
+    'scheduled',
+    now - 1000,
+    { scanned: 0, retiredKeys: 0, orphanedKeys: 0, moreWork: false },
+  );
+  assert.equal(stale, false);
+  assert.deepEqual(await attachments.cleanupProgress(), first);
+  assert.deepEqual(await attachments.latestCleanupRuns(), [scheduledResult]);
+
+  const manual = await post(origin);
+  assert.equal(manual.status, 303);
+  assertPrivate(manual);
+  const manualPage = await openPage(
+    new URL(manual.headers.get('Location'), origin).href,
+  );
+  assert.match(manualPage, /Manual cleanup pass finished/);
+  assert.match(manualPage, /The pass reached the end of the scan/);
+  assert.doesNotMatch(manualPage, /draft-jpegs\//);
+  const runs = await attachments.latestCleanupRuns();
+  assert.deepEqual(
+    runs.find((run) => run.trigger === 'scheduled'),
+    scheduledResult,
+  );
+  assert.equal(
+    runs.find((run) => run.trigger === 'manual').outcome,
+    'completed',
+  );
+  assert.deepEqual(await attachments.cleanupProgress(), {
+    cursor: null,
+    revision: 2,
+  });
+  const remaining = await bucket.list({ prefix: 'draft-jpegs/' });
+  assert.deepEqual(
+    remaining.objects.map(({ key }) => key).sort(),
+    [active.key, pending.key].sort(),
+  );
+  assert(await bucket.head('another-prefix/untouched'));
+  assert.equal(
+    (await attachments.get(active.own.photo_id, now)).state,
+    'attached',
+  );
+  assert.equal(
+    (await attachments.get(pending.own.photo_id, now)).state,
+    'pending',
+  );
+
+  await scheduled();
+  assert.deepEqual(await attachments.cleanupProgress(), {
+    cursor: null,
+    revision: 3,
+  });
+  assert(await bucket.head(active.key));
+  assert(await bucket.head(pending.key));
+  assert.equal((await attachments.latestCleanupRuns()).length, 2);
+}
 
 export async function verifyDraftAttachments(
   worker,
@@ -42,6 +203,12 @@ export async function verifyDraftAttachments(
         'X-Photo-SHA256': hash(bytes),
         ...options,
       },
+    });
+  const discard = (id, revision, headers = {}) =>
+    send(`${photos}/${id}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ expectedRevision: revision }),
+      headers: { 'Content-Type': 'application/json', ...headers },
     });
   const getDraft = async (id) =>
     (await (await send(`${photos}?ids=${id}`)).json()).items[0];
@@ -148,12 +315,6 @@ export async function verifyDraftAttachments(
     (await repository.getPhotoDraft(ids[2])).metadata.caption,
     'Keep this caption through recovery.',
   );
-  await db
-    .prepare('INSERT INTO published_photos VALUES (?, 2, 100)')
-    .bind(ids[2])
-    .run();
-  assert.equal((await send(url(ids[2]))).status, 200);
-
   const removed = await send(url(ids[0]), { method: 'DELETE' });
   assert.equal(removed.status, 200);
   assertPrivate(removed);
@@ -183,4 +344,120 @@ export async function verifyDraftAttachments(
   assert.equal(await bucket.head(expiredKey), null);
   assert.equal((await send(url(ids[3]), { method: 'POST' })).status, 404);
   assert(await bucket.head(recoverKey));
+
+  const tagA = await repository.createTag({
+    name: 'Discard fixture first tag',
+  });
+  const tagB = await repository.createTag({
+    name: 'Discard fixture second tag',
+  });
+  const tags = [tagA.tagId, tagB.tagId];
+  const photoId = ids[2];
+  await repository.savePhotoDraft(photoId, 2, tags);
+  await db.batch([
+    ...tags.map((tag) =>
+      db.prepare('INSERT INTO published_tags VALUES (?, 1)').bind(tag),
+    ),
+    db.prepare('INSERT INTO published_photos VALUES (?, 3, 100)').bind(photoId),
+    ...tags.map((tag) =>
+      db
+        .prepare('INSERT INTO published_photo_tags VALUES (?, 3, ?, 100)')
+        .bind(photoId, tag),
+    ),
+  ]);
+  await repository.savePhotoMetadataDraft(photoId, 3, {
+    title: 'Unpublished draft edits',
+  });
+  const related = () =>
+    db
+      .prepare(
+        'SELECT photo_count FROM tag_cooccurrences WHERE tag_id=? AND related_id=?',
+      )
+      .bind(...tags)
+      .first();
+  assert.equal((await related()).photo_count, 1);
+  const deniedDiscard = await worker.dispatchFetch(
+    origin + `${photos}/${photoId}`,
+    {
+      method: 'DELETE',
+    },
+  );
+  assert.equal(deniedDiscard.status, 401);
+  assertPrivate(deniedDiscard);
+  assert.equal(
+    (await discard(photoId, 4, { Origin: 'https://elsewhere.example.test' }))
+      .status,
+    403,
+  );
+  assert.equal((await discard(photoId, 0)).status, 400);
+  assert.equal((await discard(photoId, 3)).status, 409);
+  assert.equal((await getDraft(photoId)).title, 'Unpublished draft edits');
+  assert.equal((await send(url(photoId))).status, 200);
+  const discarded = await discard(photoId, 4);
+  assert.equal(discarded.status, 200, await discarded.text());
+  assertPrivate(discarded);
+  assert.equal((await discard(photoId, 4)).status, 200);
+  assert.equal((await discard(photoId, 3)).status, 404);
+  assert.equal(await getDraft(photoId), undefined);
+  assert.equal(
+    (await send(`${photos}/capture?photoId=${photoId}`)).status,
+    404,
+  );
+  assert.equal((await send(url(photoId))).status, 404);
+  assert.equal(await related(), null);
+  assert.equal(await repository.getPhotoRevision(photoId, 4), null);
+  assert.equal(
+    (await repository.getPublishedPhotoMetadata(photoId)).title,
+    'Edited during upload',
+  );
+  assert.deepEqual(
+    (await repository.listPublishedTagPhotos(tags[0])).map(
+      (entry) => entry.photoId,
+    ),
+    [photoId],
+  );
+  assert(await bucket.head(recoverKey));
+  assert.equal((await cleanup()).status, 200);
+  assert.equal(await bucket.head(recoverKey), null);
+
+  const newId = crypto.randomUUID();
+  const retryCreation = await send(photos, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      photos: [newId, photoId].map((id) => ({
+        photoId: id,
+        title: 'Retry',
+        tagIds: [],
+        tagNames: ['Discarded retry tag'],
+      })),
+    }),
+  });
+  assert.equal(retryCreation.status, 409);
+  assert.equal(await getDraft(newId), undefined);
+  assert.equal(await repository.findDraftTag('Discarded retry tag'), null);
+
+  const attachments = new DraftAttachmentRepository(db);
+  const pending = (
+    await attachments.reserve(
+      ids[3],
+      hash(baseJpeg),
+      baseJpeg.length,
+      Date.now(),
+    )
+  ).own;
+  assert.equal(pending.state, 'pending');
+  assert.equal((await discard(ids[3], 1)).status, 200);
+  assert.equal((await put(ids[3], baseJpeg)).status, 404);
+  assert.equal((await cleanup()).status, 200);
+  const lateKey = `draft-jpegs/${pending.id}`;
+  await bucket.put(lateKey, baseJpeg, { sha256: hash(baseJpeg) });
+  assert.equal(await attachments.promote(pending, Date.now()), null);
+  assert.equal((await send(url(ids[3]), { method: 'POST' })).status, 404);
+  assert.equal((await cleanup()).status, 200);
+  assert.equal(await bucket.head(lateKey), null);
+  assert.deepEqual(
+    (await db.prepare('PRAGMA foreign_key_check').all()).results,
+    [],
+  );
 }

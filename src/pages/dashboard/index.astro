@@ -1,4 +1,5 @@
 ---
+import { env } from 'cloudflare:workers';
 import BaseLayout from '../../layouts/BaseLayout.astro';
 
 if (!Astro.locals.owner)
@@ -11,6 +12,9 @@ if (!Astro.locals.owner)
     <a href="/dashboard/tags">Tags</a>
     <a href="/dashboard/collections">Collections</a>
     <a href="/dashboard/photos">Photograph review</a>
+    {env.CATALOGUE && env.DRAFT_PHOTOS && (
+      <a href="/dashboard/storage">Draft photo storage</a>
+    )}
   </nav>
   <p>
     You’re signed in. Your photo and collection tools will appear here as
