@@ -7,6 +7,24 @@
   "workers_dev": true,
   "preview_urls": true,
   "routes": [],
+  "d1_databases": [
+    {
+      "binding": "CATALOGUE",
+      "database_name": "brianmorris-photos-catalogue",
+      "database_id": "a377d4c0-5ed2-4441-ba5d-529b37d7417d",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "r2_buckets": [
+    {
+      "binding": "DRAFT_PHOTOS",
+      "bucket_name": "brianmorrisphotos",
+    },
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"],
+  },
+  "previews": {},
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
